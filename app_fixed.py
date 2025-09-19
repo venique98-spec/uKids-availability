@@ -12,12 +12,12 @@ import streamlit as st
 st.set_page_config(page_title="Availability Form", page_icon="🗓️", layout="centered")
 st.title("🗓️ Availability Form")
 
-# CSVs live in ./data (matches your repo)
+# CSVs expected in ./data
 FQ_PATH = Path(__file__).parent / "data" / "Form questions.csv"
 SB_PATH = Path(__file__).parent / "data" / "Serving base with allocated directors.csv"
 
 # -----------------------------------------------------------------------------
-# SECRETS / ADMIN KEY (supports both top-level and [general])
+# SECRETS / ADMIN KEY (works for both top-level and [general] sections)
 # -----------------------------------------------------------------------------
 def get_admin_key() -> str:
     try:
@@ -64,7 +64,6 @@ def load_data():
     fq = read_csv_local(FQ_PATH)
     sb = read_csv_local(SB_PATH)
 
-    # Sanity checks
     required_fq = {"QuestionID", "QuestionText", "QuestionType", "Options Source", "DependsOn", "Show Condition"}
     missing_fq = required_fq - set(fq.columns)
     if missing_fq:
@@ -75,7 +74,6 @@ def load_data():
     if missing_sb:
         raise RuntimeError(f"`Serving base with allocated directors.csv` missing columns: {', '.join(sorted(missing_sb))}")
 
-    # Normalize text columns
     fq = fq.assign(
         QuestionID=fq["QuestionID"].astype(str).str.strip(),
         QuestionText=fq["QuestionText"].astype(str).str.strip(),
@@ -91,13 +89,11 @@ def load_data():
         **{"Serving Girl": sb["Serving Girl"].astype(str).str.strip()}
     )
 
-    # Build Director -> [Serving Girl]
     serving_map = (
         sb.groupby("Director")["Serving Girl"]
         .apply(lambda s: sorted({x for x in s if x}))
         .to_dict()
     )
-
     return fq, sb, serving_map
 
 
@@ -105,9 +101,8 @@ def yes_count(answers: dict, ids: list[str]) -> int:
     """Count how many of the given question IDs have the answer 'Yes'."""
     return sum(1 for qid in ids if str(answers.get(qid, "")).lower() == "yes")
 
-
 # -----------------------------------------------------------------------------
-# IN-MEMORY SUBMISSION STORE (persists while the app process is alive)
+# IN-MEMORY SUBMISSION STORE
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def submission_store():
@@ -125,12 +120,22 @@ def submissions_dataframe() -> pd.DataFrame:
         return pd.DataFrame()
     return pd.DataFrame(store)
 
-def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Responses")
-    return output.getvalue()
-
+# ---- Export helper: Excel if possible, else CSV fallback ---------------------
+def make_download_payload(df: pd.DataFrame):
+    """
+    Returns (bytes, filename, mime). Prefers Excel via openpyxl; falls back to CSV if openpyxl is missing.
+    """
+    try:
+        import openpyxl  # noqa: F401
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Responses")
+        return output.getvalue(), "uKids_availability_responses.xlsx", (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    except Exception:
+        csv_bytes = df.to_csv(index=False).encode("utf-8")
+        return csv_bytes, "uKids_availability_responses.csv", "text/csv"
 
 # -----------------------------------------------------------------------------
 # LOAD DATA
@@ -141,8 +146,8 @@ except Exception as e:
     st.error(f"Data load error: {e}")
     with st.expander("Debug info"):
         st.write("Looking for files at:")
-        st.write(str(FQ_PATH))
-        st.write(str(SB_PATH))
+        st.code(str(FQ_PATH))
+        st.code(str(SB_PATH))
         try:
             st.write("Directory listing of ./data:", [p.name for p in (Path(__file__).parent / "data").iterdir()])
         except Exception:
@@ -199,12 +204,9 @@ if not q7_row.empty:
 st.subheader("Review")
 yes_ids = form_questions[form_questions["Options Source"].str.lower() == "yes_no"]["QuestionID"].astype(str).tolist()
 c1, c2, c3 = st.columns(3)
-with c1:
-    st.metric("Director", answers.get("Q1") or "—")
-with c2:
-    st.metric("Name", answers.get("Q2") or "—")
-with c3:
-    st.metric("Yes count", yes_count(answers, yes_ids))
+with c1: st.metric("Director", answers.get("Q1") or "—")
+with c2: st.metric("Name", answers.get("Q2") or "—")
+with c3: st.metric("Yes count", yes_count(answers, yes_ids))
 
 errors = {}
 if st.button("Submit"):
@@ -231,7 +233,7 @@ if st.button("Submit"):
         st.json(payload)
 
 # -----------------------------------------------------------------------------
-# ADMIN PANEL (excel export for you only)
+# ADMIN PANEL (excel export for you only, with fallback)
 # -----------------------------------------------------------------------------
 with st.expander("Admin"):
     has_secret = bool(ADMIN_KEY)
@@ -264,12 +266,12 @@ with st.expander("Admin"):
                 flat_df = pd.DataFrame(flat_rows)
                 st.dataframe(flat_df, use_container_width=True)
 
-                xlsx_bytes = df_to_excel_bytes(flat_df)
+                bytes_data, fname, mime = make_download_payload(flat_df)
                 st.download_button(
-                    "Download all responses (Excel)",
-                    data=xlsx_bytes,
-                    file_name="uKids_availability_responses.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "Download all responses",
+                    data=bytes_data,
+                    file_name=fname,
+                    mime=mime,
                 )
             else:
                 st.warning("No submissions yet.")

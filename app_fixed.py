@@ -166,4 +166,229 @@ def inject_screenshot_css():
         .report-label { width: 160px; color: #444; font-weight: 600; }
         .report-value { flex: 1; color: #111; }
         .avail-item { display:flex; justify-content: space-between; padding: 8px 12px; border: 1px solid #eee; border-radius: 10px; margin: 6px 0; }
-        .ok { color: #0a7b36; font-wei
+        .ok { color: #0a7b36; font-weight: 700; }
+        .no { color: #b00020; font-weight: 700; }
+        .muted { color: #666; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def availability_pairs(form_questions: pd.DataFrame, answers: dict):
+    """Return list of (label, 'Yes'/'No') in the order of yes_no questions."""
+    rows = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"]
+    pairs = []
+    for _, r in rows.iterrows():
+        qid = str(r["QuestionID"])
+        label = str(r["QuestionText"]).strip()
+        val = str(answers.get(qid, "") or "No")
+        pairs.append((label, val))
+    return pairs
+
+def render_report_card(name: str, director: str, pairs: list[tuple[str, str]], reason: str|None, timestamp_iso: str|None):
+    inject_screenshot_css()
+    # Build availability HTML
+    avail_html = []
+    for label, val in pairs:
+        badge = '<span class="ok">✅ Yes</span>' if val.lower() == "yes" else '<span class="no">❌ No</span>'
+        avail_html.append(f'<div class="avail-item"><span>{label}</span><span>{badge}</span></div>')
+    ts = timestamp_iso or datetime.utcnow().isoformat() + "Z"
+    reason_html = f'<div class="report-row"><div class="report-label">Reason</div><div class="report-value">{reason}</div></div>' if (reason and reason.strip()) else ""
+    st.markdown(
+        f"""
+        <div class="report-card">
+            <div class="report-title">Availability Confirmation</div>
+            <div class="report-sub">Generated: {ts}</div>
+
+            <div class="report-row">
+                <div class="report-label">Name</div>
+                <div class="report-value">{name or '—'}</div>
+            </div>
+            <div class="report-row">
+                <div class="report-label">Director</div>
+                <div class="report-value">{director or '—'}</div>
+            </div>
+
+            <div class="report-row" style="margin-top:10px;">
+                <div class="report-label">Availability</div>
+                <div class="report-value">
+                    {''.join(avail_html)}
+                </div>
+            </div>
+
+            {reason_html}
+            <div class="report-sub muted" style="margin-top:12px;">(You can screenshot this card and share.)</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# -----------------------------------------------------------------------------
+# LOAD DATA
+# -----------------------------------------------------------------------------
+try:
+    form_questions, serving_base, serving_map = load_data()
+except Exception as e:
+    st.error(f"Data load error: {e}")
+    with st.expander("Debug info"):
+        st.write("Looking for files at:")
+        st.code(str(FQ_PATH))
+        st.code(str(SB_PATH))
+        try:
+            st.write("Directory listing of ./data:", [p.name for p in (Path(__file__).parent / "data").iterdir()])
+        except Exception:
+            st.write("Could not list ./data")
+    st.stop()
+
+# -----------------------------------------------------------------------------
+# STATE
+# -----------------------------------------------------------------------------
+if "answers" not in st.session_state:
+    st.session_state.answers = {}
+answers = st.session_state.answers
+
+# -----------------------------------------------------------------------------
+# FORM UI
+# -----------------------------------------------------------------------------
+st.subheader("Your details")
+
+directors = sorted([d for d in serving_map.keys() if d])
+answers["Q1"] = st.selectbox("Please select your director’s name", options=[""] + directors, index=0)
+
+if answers.get("Q1"):
+    girls = serving_map.get(answers["Q1"], [])
+    answers["Q2"] = st.selectbox("Please select your name", options=[""] + girls, index=0)
+else:
+    answers["Q2"] = ""
+
+st.subheader("Availability in October")
+availability_questions = form_questions[
+    form_questions["Options Source"].astype(str).str.lower() == "yes_no"
+].copy()
+
+for _, q in availability_questions.iterrows():
+    qid = str(q["QuestionID"])
+    qtext = str(q["QuestionText"])
+    current = answers.get(qid)
+    idx = 0 if current == "Yes" else 1 if current == "No" else 1
+    choice = st.radio(qtext, ["Yes", "No"], index=idx, key=qid, horizontal=True)
+    answers[qid] = choice
+
+# Conditional Q7 (reason shown if fewer than 2 Yes across its DependsOn)
+q7_row = form_questions[form_questions["QuestionID"].astype(str) == "Q7"]
+dep_ids: list[str] = []
+if not q7_row.empty:
+    q7 = q7_row.iloc[0]
+    q7_text = str(q7["QuestionText"])
+    dep_ids = [s.strip() for s in str(q7["DependsOn"]).split(",") if s.strip()]
+    if yes_count(answers, dep_ids) < 2:
+        answers["Q7"] = st.text_area(q7_text, value=answers.get("Q7", ""))
+    else:
+        answers["Q7"] = answers.get("Q7", "")
+
+# Review + Submit
+st.subheader("Review")
+yes_ids = form_questions[form_questions["Options Source"].str.lower() == "yes_no"]["QuestionID"].astype(str).tolist()
+c1, c2, c3 = st.columns(3)
+with c1: st.metric("Director", answers.get("Q1") or "—")
+with c2: st.metric("Name", answers.get("Q2") or "—")
+with c3: st.metric("Yes count", yes_count(answers, yes_ids))
+
+errors = {}
+submission_payload = None
+if st.button("Submit"):
+    if not answers.get("Q1"):
+        errors["Q1"] = "Please select a director."
+    if not answers.get("Q2"):
+        errors["Q2"] = "Please select your name."
+    if not q7_row.empty and yes_count(answers, dep_ids) < 2:
+        if not answers.get("Q7") or len(answers["Q7"].strip()) < 5:
+            errors["Q7"] = "Please provide a brief reason (at least 5 characters)."
+
+    if errors:
+        for v in errors.values():
+            st.error(v)
+    else:
+        submission_payload = {
+            "director": answers.get("Q1") or None,
+            "servingGirl": answers.get("Q2") or None,
+            "availability": {qid: answers.get(qid) for qid in yes_ids},
+            "reason": answers.get("Q7") or None,
+        }
+        add_submission(submission_payload)
+        st.success("Form submitted! Thank you.")
+        st.json(submission_payload)
+
+        # --- Screenshot-friendly report right after submission ---
+        pairs = availability_pairs(form_questions, answers)
+        render_report_card(
+            name=submission_payload["servingGirl"],
+            director=submission_payload["director"],
+            pairs=pairs,
+            reason=submission_payload["reason"],
+            timestamp_iso=datetime.utcnow().isoformat() + "Z",
+        )
+
+        st.markdown("---")
+        screen_mode = st.checkbox("Enter Screenshot Mode (hide menus and show report only)")
+        if screen_mode:
+            st.session_state["__screenshot_mode__"] = True
+
+# If user toggled Screenshot Mode separately (without re-submitting)
+if st.session_state.get("__screenshot_mode__"):
+    # Try to reconstruct last submission-like view from current answers
+    pairs = availability_pairs(form_questions, answers)
+    render_report_card(
+        name=answers.get("Q2"),
+        director=answers.get("Q1"),
+        pairs=pairs,
+        reason=answers.get("Q7"),
+        timestamp_iso=datetime.utcnow().isoformat() + "Z",
+    )
+    st.stop()  # Stop rendering anything else to keep the screen clean
+
+# -----------------------------------------------------------------------------
+# ADMIN PANEL (excel export for you only, with fallback)
+# -----------------------------------------------------------------------------
+with st.expander("Admin"):
+    has_secret = bool(ADMIN_KEY)
+    st.caption(f"Secrets loaded: {'yes' if has_secret else 'no'}")
+    if not has_secret:
+        st.info(
+            "Admin key not set. Add in Settings → Secrets as either:\n\n"
+            "ADMIN_KEY = \"your-secret\"\n\nor\n\n[general]\nADMIN_KEY = \"your-secret\""
+        )
+    else:
+        key = st.text_input("Enter admin key to access exports", type="password")
+        if key == ADMIN_KEY:
+            st.success("Admin unlocked.")
+            df = submissions_dataframe()
+            st.write(f"Total submissions: **{len(df)}**")
+            if len(df) > 0:
+                # Flatten availability dict to columns
+                flat_rows = []
+                for row in df.to_dict(orient="records"):
+                    base = {
+                        "timestamp": row.get("_timestamp"),
+                        "director": row.get("director"),
+                        "servingGirl": row.get("servingGirl"),
+                        "reason": row.get("reason"),
+                    }
+                    avail = row.get("availability") or {}
+                    for k, v in avail.items():
+                        base[f"avail_{k}"] = v
+                    flat_rows.append(base)
+                flat_df = pd.DataFrame(flat_rows)
+                st.dataframe(flat_df, use_container_width=True)
+
+                bytes_data, fname, mime = make_download_payload(flat_df)
+                st.download_button(
+                    "Download all responses",
+                    data=bytes_data,
+                    file_name=fname,
+                    mime=mime,
+                )
+            else:
+                st.warning("No submissions yet.")
+        elif key:
+            st.error("Incorrect admin key.")

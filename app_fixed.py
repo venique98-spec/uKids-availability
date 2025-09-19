@@ -1,4 +1,5 @@
-import json
+# app_fixed.py
+import re
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime
@@ -27,9 +28,9 @@ def get_admin_key() -> str:
         pass
     try:
         if "general" in st.secrets and "ADMIN_KEY" in st.secrets["general"]:
-            val = st.secrets["general"]["ADMIN_KEY"]
-            if val:
-                return str(val)
+            v = st.secrets["general"]["ADMIN_KEY"]
+            if v:
+                return str(v)
     except Exception:
         pass
     return ""
@@ -57,7 +58,6 @@ def read_csv_local(path: Path) -> pd.DataFrame:
             sample = f.read(4096)
     delimiter = ";" if sample.count(";") > sample.count(",") else ","
     return pd.read_csv(path, encoding="latin1", sep=delimiter, engine="python")
-
 
 @st.cache_data(show_spinner=False)
 def load_data():
@@ -96,11 +96,8 @@ def load_data():
     )
     return fq, sb, serving_map
 
-
-def yes_count(answers: dict, ids: list[str]) -> int:
-    """Count how many of the given question IDs have the answer 'Yes'."""
+def yes_count(answers: dict, ids):
     return sum(1 for qid in ids if str(answers.get(qid, "")).lower() == "yes")
-
 
 # -----------------------------------------------------------------------------
 # IN-MEMORY SUBMISSION STORE
@@ -139,33 +136,62 @@ def make_download_payload(df: pd.DataFrame):
         return csv_bytes, "uKids_availability_responses.csv", "text/csv"
 
 # -----------------------------------------------------------------------------
-# REPORT RENDERING (screenshot-friendly)
+# REPORT HELPERS (use Report Label column if present)
 # -----------------------------------------------------------------------------
+REPORT_LABEL_CANDIDATES = ["Report Label", "ReportLabel", "Label"]
+
+def extract_date_from_label(label: str) -> str:
+    """
+    Fallback: 'Are you available the 5th of October?' -> '5 October'
+    """
+    m = re.search(r'(\d{1,2})(?:st|nd|rd|th)?\s+of\s+(October|Nov|November|Oct)', label, flags=re.I)
+    if m:
+        return f"{m.group(1)} October"
+    m2 = re.search(r'(\d{1,2})\s+(October)', label, flags=re.I)
+    if m2:
+        return f"{m2.group(1)} {m2.group(2).title()}"
+    return label.strip()
+
+def get_report_label(row) -> str:
+    """Prefer a custom label from the CSV; fall back to extracting from QuestionText."""
+    for col in REPORT_LABEL_CANDIDATES:
+        if col in row and str(row[col]).strip():
+            return str(row[col]).strip()
+    return extract_date_from_label(str(row.get("QuestionText", "")).strip())
+
+def build_human_report(form_questions: pd.DataFrame, answers: dict) -> str:
+    director = answers.get("Q1") or "—"
+    name = answers.get("Q2") or "—"
+    lines = [f"Director: {director}", f"Serving Girl: {name}", "Availability:"]
+    rows = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"]
+    for _, r in rows.iterrows():
+        qid = str(r["QuestionID"])
+        label = get_report_label(r)
+        val = (answers.get(qid) or "No").title()
+        lines.append(f"{label}: {val}")
+    reason = (answers.get("Q7") or "").strip()
+    if reason:
+        lines.append(f"Reason: {reason}")
+    return "\n".join(lines)
+
 def inject_screenshot_css():
     st.markdown(
         """
         <style>
-        /* Hide Streamlit default chrome in screenshot mode */
-        #MainMenu {visibility: hidden;}
-        header {visibility: hidden;}
-        footer {visibility: hidden;}
-        /* Clean card look */
+        #MainMenu, header, footer {visibility: hidden;}
         .report-card {
-            max-width: 760px;
-            margin: 0 auto;
-            padding: 20px 22px;
-            border: 1px solid #e6e6e6;
-            border-radius: 14px;
-            background: white;
+            max-width: 760px; margin: 0 auto; padding: 20px 22px;
+            border: 1px solid #e6e6e6; border-radius: 14px; background: white;
             box-shadow: 0 4px 18px rgba(0,0,0,0.06);
-            font-family: system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Liberation Sans', sans-serif;
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
         }
         .report-title { font-size: 20px; font-weight: 700; margin: 0 0 6px; }
         .report-sub { color: #666; margin-bottom: 14px; font-size: 13px; }
         .report-row { display: flex; gap: 12px; margin: 6px 0; }
         .report-label { width: 160px; color: #444; font-weight: 600; }
         .report-value { flex: 1; color: #111; }
-        .avail-item { display:flex; justify-content: space-between; padding: 8px 12px; border: 1px solid #eee; border-radius: 10px; margin: 6px 0; }
+        .avail-item { display:flex; justify-content: space-between; padding: 8px 12px;
+                      border: 1px solid #eee; border-radius: 10px; margin: 6px 0; }
         .ok { color: #0a7b36; font-weight: 700; }
         .no { color: #b00020; font-weight: 700; }
         .muted { color: #666; }
@@ -175,23 +201,20 @@ def inject_screenshot_css():
     )
 
 def availability_pairs(form_questions: pd.DataFrame, answers: dict):
-    """Return list of (label, 'Yes'/'No') in the order of yes_no questions."""
     rows = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"]
     pairs = []
     for _, r in rows.iterrows():
         qid = str(r["QuestionID"])
-        label = str(r["QuestionText"]).strip()
-        val = str(answers.get(qid, "") or "No")
-        pairs.append((label, val))
+        label = get_report_label(r)
+        pairs.append((label, (answers.get(qid) or "No").title()))
     return pairs
 
-def render_report_card(name: str, director: str, pairs: list[tuple[str, str]], reason: str|None, timestamp_iso: str|None):
+def render_report_card(name: str, director: str, pairs, reason: str, timestamp_iso: str):
     inject_screenshot_css()
-    # Build availability HTML
     avail_html = []
-    for label, val in pairs:
+    for date, val in pairs:
         badge = '<span class="ok">✅ Yes</span>' if val.lower() == "yes" else '<span class="no">❌ No</span>'
-        avail_html.append(f'<div class="avail-item"><span>{label}</span><span>{badge}</span></div>')
+        avail_html.append(f'<div class="avail-item"><span>{date}</span><span>{badge}</span></div>')
     ts = timestamp_iso or datetime.utcnow().isoformat() + "Z"
     reason_html = f'<div class="report-row"><div class="report-label">Reason</div><div class="report-value">{reason}</div></div>' if (reason and reason.strip()) else ""
     st.markdown(
@@ -217,7 +240,7 @@ def render_report_card(name: str, director: str, pairs: list[tuple[str, str]], r
             </div>
 
             {reason_html}
-            <div class="report-sub muted" style="margin-top:12px;">(You can screenshot this card and share.)</div>
+            <div class="report-sub muted" style="margin-top:12px;">(Screenshot this card.)</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -231,14 +254,16 @@ try:
 except Exception as e:
     st.error(f"Data load error: {e}")
     with st.expander("Debug info"):
-        st.write("Looking for files at:")
-        st.code(str(FQ_PATH))
-        st.code(str(SB_PATH))
+        st.code(str(FQ_PATH)); st.code(str(SB_PATH))
         try:
             st.write("Directory listing of ./data:", [p.name for p in (Path(__file__).parent / "data").iterdir()])
         except Exception:
             st.write("Could not list ./data")
     st.stop()
+
+# Optional heads-up if no Report Label column is found
+if not any(col in form_questions.columns for col in REPORT_LABEL_CANDIDATES):
+    st.warning("No 'Report Label' column found in Form questions.csv. Falling back to auto-detected labels.")
 
 # -----------------------------------------------------------------------------
 # STATE
@@ -276,7 +301,7 @@ for _, q in availability_questions.iterrows():
 
 # Conditional Q7 (reason shown if fewer than 2 Yes across its DependsOn)
 q7_row = form_questions[form_questions["QuestionID"].astype(str) == "Q7"]
-dep_ids: list[str] = []
+dep_ids = []
 if not q7_row.empty:
     q7 = q7_row.iloc[0]
     q7_text = str(q7["QuestionText"])
@@ -295,7 +320,6 @@ with c2: st.metric("Name", answers.get("Q2") or "—")
 with c3: st.metric("Yes count", yes_count(answers, yes_ids))
 
 errors = {}
-submission_payload = None
 if st.button("Submit"):
     if not answers.get("Q1"):
         errors["Q1"] = "Please select a director."
@@ -309,43 +333,36 @@ if st.button("Submit"):
         for v in errors.values():
             st.error(v)
     else:
-        submission_payload = {
+        payload = {
             "director": answers.get("Q1") or None,
             "servingGirl": answers.get("Q2") or None,
             "availability": {qid: answers.get(qid) for qid in yes_ids},
             "reason": answers.get("Q7") or None,
         }
-        add_submission(submission_payload)
+        add_submission(payload)
         st.success("Form submitted! Thank you.")
-        st.json(submission_payload)
 
-        # --- Screenshot-friendly report right after submission ---
-        pairs = availability_pairs(form_questions, answers)
-        render_report_card(
-            name=submission_payload["servingGirl"],
-            director=submission_payload["director"],
-            pairs=pairs,
-            reason=submission_payload["reason"],
-            timestamp_iso=datetime.utcnow().isoformat() + "Z",
+        # --- Plain-English report (driven by 'Report Label' column) ---
+        report_text = build_human_report(form_questions, answers)
+        st.markdown("### 📄 Screenshot-friendly report (text)")
+        st.code(report_text, language=None)
+        st.download_button(
+            "Download report as .txt",
+            data=report_text.encode("utf-8"),
+            file_name=f"Availability_{(answers.get('Q2') or 'name').replace(' ', '_')}.txt",
+            mime="text/plain",
         )
 
-        st.markdown("---")
-        screen_mode = st.checkbox("Enter Screenshot Mode (hide menus and show report only)")
-        if screen_mode:
-            st.session_state["__screenshot_mode__"] = True
-
-# If user toggled Screenshot Mode separately (without re-submitting)
-if st.session_state.get("__screenshot_mode__"):
-    # Try to reconstruct last submission-like view from current answers
-    pairs = availability_pairs(form_questions, answers)
-    render_report_card(
-        name=answers.get("Q2"),
-        director=answers.get("Q1"),
-        pairs=pairs,
-        reason=answers.get("Q7"),
-        timestamp_iso=datetime.utcnow().isoformat() + "Z",
-    )
-    st.stop()  # Stop rendering anything else to keep the screen clean
+        # --- Optional: visual report card ---
+        st.markdown("### 🪪 Report card")
+        pairs = availability_pairs(form_questions, answers)
+        render_report_card(
+            name=answers.get("Q2"),
+            director=answers.get("Q1"),
+            pairs=pairs,
+            reason=answers.get("Q7"),
+            timestamp_iso=datetime.utcnow().isoformat() + "Z",
+        )
 
 # -----------------------------------------------------------------------------
 # ADMIN PANEL (excel export for you only, with fallback)
@@ -382,12 +399,7 @@ with st.expander("Admin"):
                 st.dataframe(flat_df, use_container_width=True)
 
                 bytes_data, fname, mime = make_download_payload(flat_df)
-                st.download_button(
-                    "Download all responses",
-                    data=bytes_data,
-                    file_name=fname,
-                    mime=mime,
-                )
+                st.download_button("Download all responses", data=bytes_data, file_name=fname, mime=mime)
             else:
                 st.warning("No submissions yet.")
         elif key:

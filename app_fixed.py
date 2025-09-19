@@ -1,31 +1,48 @@
+import json
+from pathlib import Path
 import pandas as pd
 import streamlit as st
-from pathlib import Path
-import json
 
 st.set_page_config(page_title="Availability Form", page_icon="🗓️", layout="centered")
 st.title("🗓️ Availability Form")
 
+# ---- Paths -------------------------------------------------------------------
 DATA_DIR = Path(__file__).parent / "data"
 FQ_PATH = DATA_DIR / "Form questions.csv"
 SB_PATH = DATA_DIR / "Serving base with allocated directors.csv"
 
+# ---- Robust CSV loader -------------------------------------------------------
 def read_csv_local(path: Path) -> pd.DataFrame:
-    # Try common encodings used by Excel exports
-    for enc in ("cp1252", "utf-8", "latin1"):
+    """
+    Robustly read CSVs exported from Excel/Google Sheets (handles BOM, ; delimiters, cp1252/utf8/latin1).
+    """
+    # Try common encodings with automatic delimiter detection
+    for enc in ("utf-8-sig", "cp1252", "latin1", "utf-8"):
         try:
-            return pd.read_csv(path, encoding=enc)
+            return pd.read_csv(path, encoding=enc, sep=None, engine="python")
         except Exception:
-            continue
-    raise ValueError(f"Could not parse: {path.name}")
+            pass
 
-# Load once
-@st.cache_data
+    # If that fails, sniff whether ; appears more than ,
+    try:
+        sample = path.read_text(errors="ignore")
+    except Exception:
+        # Fallback to raw open for certain environments
+        with open(path, "r", errors="ignore") as f:
+            sample = f.read(4096)
+    delimiter = ";" if sample.count(";") > sample.count(",") else ","
+
+    # Final attempt with delimiter forced
+    return pd.read_csv(path, encoding="latin1", sep=delimiter, engine="python")
+
+
+# ---- Data loading (cached) ---------------------------------------------------
+@st.cache_data(show_spinner=False)
 def load_data():
     fq = read_csv_local(FQ_PATH)
     sb = read_csv_local(SB_PATH)
 
-    # Basic sanity checks
+    # Sanity checks
     required_fq = {"QuestionID", "QuestionText", "QuestionType", "Options Source", "DependsOn", "Show Condition"}
     missing_fq = required_fq - set(fq.columns)
     if missing_fq:
@@ -36,32 +53,50 @@ def load_data():
     if missing_sb:
         raise RuntimeError(f"`Serving base with allocated directors.csv` missing columns: {', '.join(sorted(missing_sb))}")
 
-    # Build serving map
+    # Normalize whitespace
+    fq = fq.assign(
+        QuestionID=fq["QuestionID"].astype(str).str.strip(),
+        QuestionText=fq["QuestionText"].astype(str).str.strip(),
+        QuestionType=fq["QuestionType"].astype(str).str.strip(),
+        **{
+            "Options Source": fq["Options Source"].astype(str).str.strip(),
+            "DependsOn": fq["DependsOn"].astype(str).str.strip(),
+            "Show Condition": fq["Show Condition"].astype(str).str.strip(),
+        }
+    )
+
     sb = sb.assign(
         Director=sb["Director"].astype(str).str.strip(),
         **{"Serving Girl": sb["Serving Girl"].astype(str).str.strip()}
     )
+
+    # Build Director -> [Serving Girl] mapping (unique + sorted)
     serving_map = (
         sb.groupby("Director")["Serving Girl"]
         .apply(lambda s: sorted({x for x in s if x}))
         .to_dict()
     )
+
     return fq, sb, serving_map
 
+
+def yes_count(answers: dict, ids: list[str]) -> int:
+    return sum(1 for qid in ids if str(answers.get(qid, "")).lower() == "yes")
+
+
+# ---- Load data ---------------------------------------------------------------
 try:
     form_questions, serving_base, serving_map = load_data()
 except Exception as e:
     st.error(f"Data load error: {e}")
     st.stop()
 
-def yes_count(answers: dict, ids: list[str]) -> int:
-    return sum(1 for qid in ids if str(answers.get(qid, "")).lower() == "yes")
-
+# ---- State -------------------------------------------------------------------
 if "answers" not in st.session_state:
     st.session_state.answers = {}
 answers = st.session_state.answers
 
-# ---------- FORM UI ----------
+# ---- UI: Details -------------------------------------------------------------
 st.subheader("Your details")
 
 directors = sorted([d for d in serving_map.keys() if d])
@@ -73,7 +108,9 @@ if answers.get("Q1"):
 else:
     answers["Q2"] = ""
 
+# ---- UI: Availability --------------------------------------------------------
 st.subheader("Availability in October")
+
 availability_questions = form_questions[
     form_questions["Options Source"].astype(str).str.lower() == "yes_no"
 ].copy()
@@ -81,10 +118,14 @@ availability_questions = form_questions[
 for _, q in availability_questions.iterrows():
     qid = str(q["QuestionID"])
     qtext = str(q["QuestionText"])
-    current = answers.get(qid, None)
-    choice = st.radio(qtext, ["Yes", "No"], index=(0 if current == "Yes" else 1 if current == "No" else 1), key=qid)
+    current = answers.get(qid)
+    # Default the radio to "No" if not yet answered (index=1),
+    # keep existing choice if present.
+    index = 0 if current == "Yes" else 1 if current == "No" else 1
+    choice = st.radio(qtext, ["Yes", "No"], index=index, key=qid)
     answers[qid] = choice
 
+# ---- Conditional Q7 (reason) -------------------------------------------------
 q7_row = form_questions[form_questions["QuestionID"].astype(str) == "Q7"]
 dep_ids = []
 if not q7_row.empty:
@@ -96,13 +137,16 @@ if not q7_row.empty:
     else:
         answers["Q7"] = answers.get("Q7", "")
 
-# Review + Submit
+# ---- Review + Submit ---------------------------------------------------------
 st.subheader("Review")
 yes_ids = availability_questions["QuestionID"].astype(str).tolist()
 c1, c2, c3 = st.columns(3)
-with c1: st.metric("Director", answers.get("Q1") or "—")
-with c2: st.metric("Name", answers.get("Q2") or "—")
-with c3: st.metric("Yes count", yes_count(answers, yes_ids))
+with c1:
+    st.metric("Director", answers.get("Q1") or "—")
+with c2:
+    st.metric("Name", answers.get("Q2") or "—")
+with c3:
+    st.metric("Yes count", yes_count(answers, yes_ids))
 
 errors = {}
 if st.button("Submit"):
@@ -133,6 +177,7 @@ if st.button("Submit"):
             mime="application/json",
         )
 
+# ---- Optional: Preview data --------------------------------------------------
 with st.expander("Preview parsed CSVs"):
     st.write("**Form questions.csv (first rows)**")
     st.dataframe(form_questions.head(10), use_container_width=True)

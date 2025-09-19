@@ -1,0 +1,8 @@
+QuestionID,QuestionText,QuestionType,Options Source,DependsOn,Show Condition
+Q1,Please select your director’s name,dropdown,directors,None,None
+Q2,Please select your name,dropdown,serving_girls,Q1,director={{answer}}
+Q3,Are you available the 5th of October?,radio,yes_no,None,None
+Q4,Are you available the 12th of October?,radio,yes_no,None,None
+Q5,Are you available the 19th of October?,radio,yes_no,None,None
+Q6,Are you available the 26th of October?,radio,yes_no,None,None
+Q7,Please provide a valid reason why you cannot serve twice this month,text,None,"Q3,Q4,Q5,Q6",yes_count<2

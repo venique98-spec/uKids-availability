@@ -38,6 +38,36 @@ def get_admin_key() -> str:
 ADMIN_KEY = get_admin_key()
 
 # -----------------------------------------------------------------------------
+# COLUMN-NAME NORMALIZATION (fix hidden spaces/casing)
+# -----------------------------------------------------------------------------
+def _norm_col(s: str) -> str:
+    return (
+        str(s)
+        .replace("\u00A0", " ")   # non-breaking space
+        .replace("\u200B", "")    # zero-width space
+        .strip()
+        .lower()
+    )
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df.columns = [
+        str(c).replace("\u00A0", " ").replace("\u200B", "").strip()
+        for c in df.columns
+    ]
+    return df
+
+def pick_report_label_col(df: pd.DataFrame):
+    candidates = ["report label", "reportlabel", "label"]
+    cmap = {_norm_col(c): c for c in df.columns}
+    for cand in candidates:
+        if cand in cmap:
+            return cmap[cand]  # return the original column name present in df
+    return None
+
+# Will be set after load_data()
+REPORT_LABEL_COL = None
+
+# -----------------------------------------------------------------------------
 # LOADERS
 # -----------------------------------------------------------------------------
 def read_csv_local(path: Path) -> pd.DataFrame:
@@ -63,6 +93,10 @@ def read_csv_local(path: Path) -> pd.DataFrame:
 def load_data():
     fq = read_csv_local(FQ_PATH)
     sb = read_csv_local(SB_PATH)
+
+    # normalize headers to strip hidden spaces etc.
+    fq = normalize_columns(fq)
+    sb = normalize_columns(sb)
 
     required_fq = {"QuestionID", "QuestionText", "QuestionType", "Options Source", "DependsOn", "Show Condition"}
     missing_fq = required_fq - set(fq.columns)
@@ -138,8 +172,6 @@ def make_download_payload(df: pd.DataFrame):
 # -----------------------------------------------------------------------------
 # REPORT HELPERS (use Report Label column if present)
 # -----------------------------------------------------------------------------
-REPORT_LABEL_CANDIDATES = ["Report Label", "ReportLabel", "Label"]
-
 def extract_date_from_label(label: str) -> str:
     """Fallback: 'Are you available the 5th of October?' -> '5 October'"""
     m = re.search(r'(\d{1,2})(?:st|nd|rd|th)?\s+of\s+(October|Nov|November|Oct)', label, flags=re.I)
@@ -152,9 +184,10 @@ def extract_date_from_label(label: str) -> str:
 
 def get_report_label(row) -> str:
     """Prefer a custom label from the CSV; fall back to extracting from QuestionText."""
-    for col in REPORT_LABEL_CANDIDATES:
-        if col in row and str(row[col]).strip():
-            return str(row[col]).strip()
+    # use the detected column if available
+    global REPORT_LABEL_COL
+    if REPORT_LABEL_COL and REPORT_LABEL_COL in row and str(row[REPORT_LABEL_COL]).strip():
+        return str(row[REPORT_LABEL_COL]).strip()
     return extract_date_from_label(str(row.get("QuestionText", "")).strip())
 
 def build_human_report(form_questions: pd.DataFrame, answers: dict) -> str:
@@ -187,9 +220,10 @@ except Exception as e:
             st.write("Could not list ./data")
     st.stop()
 
-# Heads-up if no Report Label column is found
-if not any(col in form_questions.columns for col in REPORT_LABEL_CANDIDATES):
-    st.warning("No 'Report Label' column found in Form questions.csv. Falling back to auto-detected labels.")
+# Detect the real Report Label column (handles hidden spaces/casing)
+REPORT_LABEL_COL = pick_report_label_col(form_questions)
+if not REPORT_LABEL_COL:
+    st.warning("No 'Report Label' column found (exact match not detected). Using auto-detected labels.")
 
 # -----------------------------------------------------------------------------
 # STATE
@@ -268,7 +302,7 @@ if st.button("Submit"):
         add_submission(payload)
         st.success("Form submitted! Thank you.")
 
-        # --- Plain-English report (driven by 'Report Label' column) ---
+        # --- Plain-English report (driven by detected Report Label column) ---
         report_text = build_human_report(form_questions, answers)
         st.markdown("### 📄 Screenshot-friendly report (text)")
         st.code(report_text, language=None)

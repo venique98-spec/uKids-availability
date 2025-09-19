@@ -9,19 +9,87 @@ st.set_page_config(page_title="Venique uKidz Rooster App - Dynamic Form", page_i
 st.title("📋 Venique uKidz Rooster App — Dynamic Form")
 st.caption("Replace Google Forms with CSV-driven, conditional forms.")
 
+_READ_HELPER_DEFINED = True
+
+def _read_table_any(f):
+    \"\"\"Robustly read a CSV/TSV with unknown encoding/delimiter; fallback to Excel.\"\"\"
+    import io
+    import pandas as pd
+    from pandas.errors import ParserError
+    # If this is a Streamlit UploadedFile, get raw bytes
+    raw = f.getvalue() if hasattr(f, "getvalue") else None
+    candidates = []
+    if raw is not None:
+        buf = io.BytesIO(raw)
+        candidates.append(("utf-8", None))
+        candidates.append(("utf-8-sig", None))
+        candidates.append(("cp1252", None))
+        candidates.append(("iso-8859-1", None))
+        # Try CSV with autodetected delimiter
+        for enc, sep in candidates:
+            buf.seek(0)
+            try:
+                return pd.read_csv(buf, encoding=enc, sep=None, engine="python")
+            except UnicodeDecodeError:
+                continue
+            except ParserError:
+                continue
+        # Try semicolon-delimited variants
+        for enc in ["utf-8", "utf-8-sig", "cp1252", "iso-8859-1"]:
+            buf.seek(0)
+            try:
+                return pd.read_csv(buf, encoding=enc, sep=";", engine="python")
+            except Exception:
+                continue
+        # Fallback: Excel
+        buf.seek(0)
+        try:
+            return pd.read_excel(buf)
+        except Exception:
+            pass
+        raise ValueError("Unable to parse the uploaded file. Please ensure it's CSV or Excel.")
+    else:
+        # Path-like on disk
+        p = Path(f)
+        # Try CSV first
+        for enc in ["utf-8", "utf-8-sig", "cp1252", "iso-8859-1"]:
+            try:
+                return pd.read_csv(p, encoding=enc, sep=None, engine="python")
+            except UnicodeDecodeError:
+                continue
+            except ParserError:
+                continue
+        for enc in ["utf-8", "utf-8-sig", "cp1252", "iso-8859-1"]:
+            try:
+                return pd.read_csv(p, encoding=enc, sep=";", engine="python")
+            except Exception:
+                continue
+        try:
+            return pd.read_excel(p)
+        except Exception:
+            raise ValueError(f"Unable to parse file at {p}.")
+    
 YES_NO = ["Yes", "No"]
 
 # ---------- Helpers ----------
 def read_csv_upload(label, help_text=None, default_paths=None):
-    """Upload or load CSV. If not uploaded, try a list of default_paths in order."""
-    up = st.file_uploader(label, type=["csv"], help=help_text, key=f"uploader_{label}")
+    \"\"\"Upload or load CSV. If not uploaded, try a list of default_paths in order.\"\"\"
+    up = st.file_uploader(label, type=[\"csv\", \"xlsx\", \"xls\"], help=help_text, key=f\"uploader_{label}\")
     if up is not None:
-        return pd.read_csv(up)
+        try:
+            return _read_table_any(up)
+        except Exception as e:
+            st.error(f\"Failed to parse uploaded file: {e}\")
+            st.stop()
     if default_paths:
         for p in default_paths:
             p = Path(p)
             if p.exists():
-                return pd.read_csv(p)
+                try:
+                    return _read_table_any(p)
+                except Exception as e:
+                    st.error(f\"Failed to parse default file '{p}': {e}\")
+                    st.stop()
     return None
 
 def normalize_depends(x: str):

@@ -13,8 +13,8 @@ st.set_page_config(page_title="Availability Form", page_icon="🗓️", layout="
 st.title("🗓️ Availability Form")
 
 # Paths: CSVs must be in the same folder as this file
-FQ_PATH = Path(__file__).parent / "Form questions.csv"
-SB_PATH = Path(__file__).parent / "Serving base with allocated directors.csv"
+FQ_PATH = Path(__file__).parent / "data" / "Form questions.csv"
+SB_PATH = Path(__file__).parent / "data" / "Serving base with allocated directors.csv"
 
 # Admin export guard (set in Streamlit Cloud → Settings → Secrets)
 # [general]

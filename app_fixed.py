@@ -141,9 +141,7 @@ def make_download_payload(df: pd.DataFrame):
 REPORT_LABEL_CANDIDATES = ["Report Label", "ReportLabel", "Label"]
 
 def extract_date_from_label(label: str) -> str:
-    """
-    Fallback: 'Are you available the 5th of October?' -> '5 October'
-    """
+    """Fallback: 'Are you available the 5th of October?' -> '5 October'"""
     m = re.search(r'(\d{1,2})(?:st|nd|rd|th)?\s+of\s+(October|Nov|November|Oct)', label, flags=re.I)
     if m:
         return f"{m.group(1)} October"
@@ -174,78 +172,6 @@ def build_human_report(form_questions: pd.DataFrame, answers: dict) -> str:
         lines.append(f"Reason: {reason}")
     return "\n".join(lines)
 
-def inject_screenshot_css():
-    st.markdown(
-        """
-        <style>
-        #MainMenu, header, footer {visibility: hidden;}
-        .report-card {
-            max-width: 760px; margin: 0 auto; padding: 20px 22px;
-            border: 1px solid #e6e6e6; border-radius: 14px; background: white;
-            box-shadow: 0 4px 18px rgba(0,0,0,0.06);
-            font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-        }
-        .report-title { font-size: 20px; font-weight: 700; margin: 0 0 6px; }
-        .report-sub { color: #666; margin-bottom: 14px; font-size: 13px; }
-        .report-row { display: flex; gap: 12px; margin: 6px 0; }
-        .report-label { width: 160px; color: #444; font-weight: 600; }
-        .report-value { flex: 1; color: #111; }
-        .avail-item { display:flex; justify-content: space-between; padding: 8px 12px;
-                      border: 1px solid #eee; border-radius: 10px; margin: 6px 0; }
-        .ok { color: #0a7b36; font-weight: 700; }
-        .no { color: #b00020; font-weight: 700; }
-        .muted { color: #666; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-def availability_pairs(form_questions: pd.DataFrame, answers: dict):
-    rows = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"]
-    pairs = []
-    for _, r in rows.iterrows():
-        qid = str(r["QuestionID"])
-        label = get_report_label(r)
-        pairs.append((label, (answers.get(qid) or "No").title()))
-    return pairs
-
-def render_report_card(name: str, director: str, pairs, reason: str, timestamp_iso: str):
-    inject_screenshot_css()
-    avail_html = []
-    for date, val in pairs:
-        badge = '<span class="ok">✅ Yes</span>' if val.lower() == "yes" else '<span class="no">❌ No</span>'
-        avail_html.append(f'<div class="avail-item"><span>{date}</span><span>{badge}</span></div>')
-    ts = timestamp_iso or datetime.utcnow().isoformat() + "Z"
-    reason_html = f'<div class="report-row"><div class="report-label">Reason</div><div class="report-value">{reason}</div></div>' if (reason and reason.strip()) else ""
-    st.markdown(
-        f"""
-        <div class="report-card">
-            <div class="report-title">Availability Confirmation</div>
-            <div class="report-sub">Generated: {ts}</div>
-
-            <div class="report-row">
-                <div class="report-label">Name</div>
-                <div class="report-value">{name or '—'}</div>
-            </div>
-            <div class="report-row">
-                <div class="report-label">Director</div>
-                <div class="report-value">{director or '—'}</div>
-            </div>
-
-            <div class="report-row" style="margin-top:10px;">
-                <div class="report-label">Availability</div>
-                <div class="report-value">
-                    {''.join(avail_html)}
-                </div>
-            </div>
-
-            {reason_html}
-            <div class="report-sub muted" style="margin-top:12px;">(Screenshot this card.)</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
 # -----------------------------------------------------------------------------
 # LOAD DATA
 # -----------------------------------------------------------------------------
@@ -261,7 +187,7 @@ except Exception as e:
             st.write("Could not list ./data")
     st.stop()
 
-# Optional heads-up if no Report Label column is found
+# Heads-up if no Report Label column is found
 if not any(col in form_questions.columns for col in REPORT_LABEL_CANDIDATES):
     st.warning("No 'Report Label' column found in Form questions.csv. Falling back to auto-detected labels.")
 
@@ -351,17 +277,6 @@ if st.button("Submit"):
             data=report_text.encode("utf-8"),
             file_name=f"Availability_{(answers.get('Q2') or 'name').replace(' ', '_')}.txt",
             mime="text/plain",
-        )
-
-        # --- Optional: visual report card ---
-        st.markdown("### 🪪 Report card")
-        pairs = availability_pairs(form_questions, answers)
-        render_report_card(
-            name=answers.get("Q2"),
-            director=answers.get("Q1"),
-            pairs=pairs,
-            reason=answers.get("Q7"),
-            timestamp_iso=datetime.utcnow().isoformat() + "Z",
         )
 
 # -----------------------------------------------------------------------------

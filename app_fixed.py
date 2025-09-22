@@ -8,8 +8,14 @@ from datetime import datetime
 
 import pandas as pd
 import streamlit as st
-import gspread
-from gspread.exceptions import APIError
+
+# gspread is required for Google Sheets mode; we keep this optional import so the app can still render
+try:
+    import gspread
+    from gspread.exceptions import APIError
+except Exception:
+    gspread = None
+    class APIError(Exception): pass  # dummy for type use
 
 # -----------------------------------------------------------------------------
 # APP CONFIG
@@ -20,15 +26,12 @@ st.title("🗓️ Availability Form")
 def apply_mobile_tweaks():
     st.markdown("""
     <style>
-      /* Bigger tap targets & cleaner layout */
       .stButton > button { width: 100%; height: 48px; font-size: 16px; }
       label[data-baseweb="radio"] { padding: 6px 0; }
-      /* Stack columns on narrow screens */
       @media (max-width: 520px){
         div[data-testid="column"] { width: 100% !important; flex: 0 0 100% !important; }
         pre, code { font-size: 15px; line-height: 1.35; }
       }
-      /* Sticky submit bar */
       .sticky-submit {
         position: sticky; bottom: 0; z-index: 999;
         background: #fff; padding: 10px 0; border-top: 1px solid #eee;
@@ -39,15 +42,19 @@ def apply_mobile_tweaks():
 apply_mobile_tweaks()
 
 # CSVs expected in ./data
-FQ_PATH = Path(__file__).parent / "data" / "Form questions.csv"
-SB_PATH = Path(__file__).parent / "data" / "Serving base with allocated directors.csv"
+DATA_DIR = Path(__file__).parent / "data"
+DATA_DIR.mkdir(exist_ok=True)
+FQ_PATH = DATA_DIR / "Form questions.csv"
+SB_PATH = DATA_DIR / "Serving base with allocated directors.csv"
 
 # -----------------------------------------------------------------------------
-# SECRETS HELPERS
+# SECRETS / ADMIN KEY
 # -----------------------------------------------------------------------------
 def _get_secret_any(*paths):
-    """Return secrets value by trying several key paths (top-level or sectioned)."""
-    cur = st.secrets
+    try:
+        cur = st.secrets
+    except Exception:
+        return None
     for path in paths:
         c = cur; ok = True
         for k in path:
@@ -66,7 +73,19 @@ def get_admin_key() -> str:
 ADMIN_KEY = get_admin_key()
 
 # -----------------------------------------------------------------------------
-# COLUMN NORMALIZATION (fix hidden spaces/casing from Excel)
+# MODE: Google Sheets (if secrets + gspread) OR Local CSV fallback
+# -----------------------------------------------------------------------------
+def is_sheets_enabled() -> bool:
+    if gspread is None:
+        return False
+    sa = _get_secret_any(["gcp_service_account"], ["general", "gcp_service_account"])
+    sid = _get_secret_any(["GSHEET_ID"], ["general", "GSHEET_ID"])
+    return bool(sa and sid)
+
+SHEETS_MODE = is_sheets_enabled()
+
+# -----------------------------------------------------------------------------
+# COLUMN NORMALIZATION
 # -----------------------------------------------------------------------------
 def _norm_col(s: str) -> str:
     return str(s).replace("\u00A0", " ").replace("\u200B", "").strip().lower()
@@ -80,7 +99,7 @@ def pick_report_label_col(df: pd.DataFrame):
     cmap = {_norm_col(c): c for c in df.columns}
     for cand in candidates:
         if cand in cmap:
-            return cmap[cand]  # actual column name present in df
+            return cmap[cand]
     return None
 
 REPORT_LABEL_COL = None  # set after load_data()
@@ -89,22 +108,14 @@ REPORT_LABEL_COL = None  # set after load_data()
 # DATA LOADERS
 # -----------------------------------------------------------------------------
 def read_csv_local(path: Path) -> pd.DataFrame:
-    """Robust CSV reader for Excel/Sheets exports (handles BOM, ; delimiter, cp1252/utf8/latin1)."""
     if not path.exists():
         raise FileNotFoundError(f"Missing file: {path}")
-
     for enc in ("utf-8-sig", "cp1252", "latin1", "utf-8"):
         try:
             return pd.read_csv(path, encoding=enc, sep=None, engine="python")
         except Exception:
             pass
-
-    # Sniff delimiter
-    try:
-        sample = path.read_text(errors="ignore")
-    except Exception:
-        with open(path, "r", errors="ignore") as f:
-            sample = f.read(4096)
+    sample = path.read_text(errors="ignore")
     delimiter = ";" if sample.count(";") > sample.count(",") else ","
     return pd.read_csv(path, encoding="latin1", sep=delimiter, engine="python")
 
@@ -112,7 +123,6 @@ def read_csv_local(path: Path) -> pd.DataFrame:
 def load_data():
     fq = read_csv_local(FQ_PATH)
     sb = read_csv_local(SB_PATH)
-
     fq = normalize_columns(fq)
     sb = normalize_columns(sb)
 
@@ -149,7 +159,7 @@ def load_data():
     return fq, sb, serving_map
 
 # -----------------------------------------------------------------------------
-# GOOGLE SHEETS CLIENT + HARDENING
+# GOOGLE SHEETS HELPERS (used only if SHEETS_MODE True)
 # -----------------------------------------------------------------------------
 def gs_retry(func, *args, **kwargs):
     """Call a gspread function with retries (handles 429/5xx bursts)."""
@@ -159,26 +169,24 @@ def gs_retry(func, *args, **kwargs):
         except APIError as e:
             status = getattr(getattr(e, "response", None), "status_code", None)
             if status in (429, 500, 502, 503):
-                sleep_s = min(10, (2 ** attempt) + random.random())
-                time.sleep(sleep_s)
+                time.sleep(min(10, (2 ** attempt) + random.random()))
                 continue
             raise
 
 @st.cache_resource
 def get_worksheet():
+    if not SHEETS_MODE:
+        raise RuntimeError("Sheets mode disabled (missing secrets or gspread not installed).")
     sa_dict = _get_secret_any(["gcp_service_account"], ["general", "gcp_service_account"])
     sheet_id = _get_secret_any(["GSHEET_ID"], ["general", "GSHEET_ID"])
-    if not sa_dict or not sheet_id:
-        raise RuntimeError("Google Sheets secrets not set. Add [gcp_service_account] and GSHEET_ID in Streamlit Secrets.")
     gc = gspread.service_account_from_dict(sa_dict)
     sh = gs_retry(gc.open_by_key, sheet_id)
-    return sh.sheet1  # first worksheet
+    return sh.sheet1
 
 @st.cache_resource
 def init_sheet_headers(desired_header: list[str]) -> list[str]:
-    """Ensure header row exists and includes desired columns, once per app process."""
     ws = get_worksheet()
-    header = gs_retry(ws.row_values, 1)  # read only row 1 (cheap)
+    header = gs_retry(ws.row_values, 1)
     if not header:
         gs_retry(ws.update, "1:1", [desired_header])
         return desired_header
@@ -196,21 +204,66 @@ def sheet_get_df(ws) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=header)
 
 @st.cache_data(ttl=30, show_spinner=False)
-def fetch_responses_df() -> pd.DataFrame:
+def fetch_responses_df_sheets() -> pd.DataFrame:
     ws = get_worksheet()
     return sheet_get_df(ws)
 
-def clear_responses_cache():
+# -----------------------------------------------------------------------------
+# LOCAL CSV FALLBACK HELPERS (not used if Sheets mode is working)
+# -----------------------------------------------------------------------------
+LOCAL_RESP_PATH = DATA_DIR / "responses_local.csv"
+
+def ensure_local_headers(desired_header: list[str]) -> list[str]:
+    if not LOCAL_RESP_PATH.exists():
+        pd.DataFrame(columns=desired_header).to_csv(LOCAL_RESP_PATH, index=False)
+        return desired_header
     try:
-        fetch_responses_df.clear()
+        df = pd.read_csv(LOCAL_RESP_PATH)
     except Exception:
+        df = pd.DataFrame(columns=desired_header)
+    missing = [c for c in desired_header if c not in df.columns]
+    if missing:
+        for col in missing:
+            df[col] = ""
+        df = df[[c for c in desired_header]]
+        df.to_csv(LOCAL_RESP_PATH, index=False)
+        return desired_header
+    return list(df.columns)
+
+def append_row_local(header: list[str], row_map: dict):
+    row = {k: row_map.get(k, "") for k in header}
+    # append without race-conditions (simple approach)
+    try:
+        df = pd.read_csv(LOCAL_RESP_PATH)
+    except Exception:
+        df = pd.DataFrame(columns=header)
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    df.to_csv(LOCAL_RESP_PATH, index=False)
+
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_responses_df_local() -> pd.DataFrame:
+    if not LOCAL_RESP_PATH.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(LOCAL_RESP_PATH)
+    except Exception:
+        return pd.DataFrame()
+
+def clear_responses_cache():
+    for fn in (fetch_responses_df_sheets, fetch_responses_df_local):
+        try:
+            fn.clear()
+        except Exception:
+            pass
+    try:
         st.cache_data.clear()
+    except Exception:
+        pass
 
 # -----------------------------------------------------------------------------
 # REPORT HELPERS
 # -----------------------------------------------------------------------------
 def extract_date_from_label(label: str) -> str:
-    """Fallback: 'Are you available the 5th of October?' -> '5 October'"""
     m = re.search(r'(\d{1,2})(?:st|nd|rd|th)?\s+of\s+(October|Nov|November|Oct)', label, flags=re.I)
     if m:
         return f"{m.group(1)} October"
@@ -245,18 +298,16 @@ def build_human_report(form_questions: pd.DataFrame, answers: dict) -> str:
     for _, r in rows.iterrows():
         qid = str(r["QuestionID"])
         label = get_report_label(r)
-        val = (answers.get(qid) or "No").title()
+        val = (answers.get(qid) or "No").").title() if False else (answers.get(qid) or "No").title()  # safeguard
         lines.append(f"{label}: {val}")
     reason = (answers.get("Q7") or "").strip()
     if reason:
         lines.append(f"Reason: {reason}")
     return "\n".join(lines)
 
-# ---- Export helper: Excel if possible, else CSV fallback ---------------------
 def make_download_payload(df: pd.DataFrame):
-    """Return (bytes, filename, mime)."""
     try:
-        import openpyxl  # noqa: F401
+        import openpyxl  # noqa
         out = BytesIO()
         with pd.ExcelWriter(out, engine="openpyxl") as xw:
             df.to_excel(xw, index=False, sheet_name="Responses")
@@ -269,10 +320,8 @@ def make_download_payload(df: pd.DataFrame):
 # NON-RESPONDERS
 # -----------------------------------------------------------------------------
 def compute_nonresponders(serving_base_df: pd.DataFrame, responses_df: pd.DataFrame) -> pd.DataFrame:
-    """Return rows from serving_base who have not submitted yet (by Director + Serving Girl)."""
     if serving_base_df is None or serving_base_df.empty:
         return pd.DataFrame(columns=["Director", "Serving Girl"])
-
     sb = serving_base_df[["Director", "Serving Girl"]].copy()
     sb["Director"] = sb["Director"].astype(str).str.strip()
     sb["Serving Girl"] = sb["Serving Girl"].astype(str).str.strip()
@@ -284,16 +333,15 @@ def compute_nonresponders(serving_base_df: pd.DataFrame, responses_df: pd.DataFr
         out["Last submission"] = ""
         return out
 
-    cols = [c for c in responses_df.columns]
+    cols = list(responses_df.columns)
     ts_col = "timestamp" if "timestamp" in cols else (cols[0] if cols else "timestamp")
-    resp = responses_df[[c for c in cols if c in ["Director", "Serving Girl"] or c == ts_col]].copy()
+    use_cols = [c for c in cols if c in ["Director", "Serving Girl"] or c == ts_col]
+    resp = responses_df[use_cols].copy()
     if ts_col not in resp.columns:
         resp[ts_col] = ""
     resp.rename(columns={ts_col: "Last submission"}, inplace=True)
-
     resp["Director"] = resp["Director"].astype(str).str.strip()
     resp["Serving Girl"] = resp["Serving Girl"].astype(str).str.strip()
-
     resp = resp.sort_values("Last submission").drop_duplicates(subset=["Director", "Serving Girl"], keep="last")
 
     merged = sb.merge(resp, on=["Director", "Serving Girl"], how="left")
@@ -311,7 +359,7 @@ except Exception as e:
     with st.expander("Debug info"):
         st.code(str(FQ_PATH)); st.code(str(SB_PATH))
         try:
-            st.write("Directory listing of ./data:", [p.name for p in (Path(__file__).parent / "data").iterdir()])
+            st.write("Directory listing of ./data:", [p.name for p in DATA_DIR.iterdir()])
         except Exception:
             st.write("Could not list ./data")
     st.stop()
@@ -349,11 +397,10 @@ for _, q in availability_questions.iterrows():
     qtext = str(q["QuestionText"])
     current = answers.get(qid)
     idx = 0 if current == "Yes" else 1 if current == "No" else 1
-    # MOBILE: vertical radios are friendlier
     choice = st.radio(qtext, ["Yes", "No"], index=idx, key=qid, horizontal=False)
     answers[qid] = choice
 
-# Conditional Q7 (reason shown if fewer than 2 Yes across its DependsOn)
+# Conditional Q7
 q7_row = form_questions[form_questions["QuestionID"].astype(str) == "Q7"]
 dep_ids = []
 if not q7_row.empty:
@@ -374,7 +421,7 @@ with c2: st.metric("Name", answers.get("Q2") or "—")
 with c3: st.metric("Yes count", yes_count(answers, yes_ids))
 
 # -----------------------------------------------------------------------------
-# SUBMIT (sticky, full-width) — with Sheets hardening
+# SUBMIT (sticky, full-width)
 # -----------------------------------------------------------------------------
 errors = {}
 st.markdown('<div class="sticky-submit">', unsafe_allow_html=True)
@@ -394,7 +441,6 @@ if submitted:
         for v in errors.values():
             st.error(v)
     else:
-        # Build flat row for Google Sheets
         now = datetime.utcnow().isoformat() + "Z"
         labels = yesno_labels(form_questions)
         row_map = {
@@ -408,19 +454,24 @@ if submitted:
             label = get_report_label(r)
             row_map[label] = (answers.get(qid) or "No").title()
 
-        # Ensure headers once & append with retries
         try:
-            ws = get_worksheet()
-            desired_header = ["timestamp", "Director", "Serving Girl", "Reason"] + labels
-            header = init_sheet_headers(desired_header)
-            row = [row_map.get(col, "") for col in header]
-            gs_retry(ws.append_row, row)
-            clear_responses_cache()
-            st.success("Submission saved to Google Sheets.")
+            if SHEETS_MODE:
+                ws = get_worksheet()
+                desired_header = ["timestamp", "Director", "Serving Girl", "Reason"] + labels
+                header = init_sheet_headers(desired_header)
+                row = [row_map.get(col, "") for col in header]
+                gs_retry(ws.append_row, row)
+                clear_responses_cache()
+                st.success("Submission saved to Google Sheets.")
+            else:
+                desired_header = ["timestamp", "Director", "Serving Girl", "Reason"] + labels
+                header = ensure_local_headers(desired_header)
+                append_row_local(header, row_map)
+                clear_responses_cache()
+                st.success("Submission saved (local file).")
         except Exception as e:
-            st.error(f"Failed to save to Google Sheets: {e}")
+            st.error(f"Failed to save submission: {e}")
 
-        # Text report for screenshot / sharing
         report_text = build_human_report(form_questions, answers)
         st.markdown("### 📄 Screenshot-friendly report (text)")
         st.code(report_text, language=None)
@@ -432,52 +483,77 @@ if submitted:
         )
 
 # -----------------------------------------------------------------------------
-# ADMIN (exports + non-responders from Google Sheets)
+# ADMIN (exports + non-responders)
 # -----------------------------------------------------------------------------
 with st.expander("Admin"):
-    has_secret = bool(ADMIN_KEY)
-    st.caption(f"Secrets loaded: {'yes' if has_secret else 'no'}")
-    if not has_secret:
-        st.info(
-            "Admin key not set. Add in Settings → Secrets as either:\n\n"
-            "ADMIN_KEY = \"your-secret\"\n\nor\n\n[general]\nADMIN_KEY = \"your-secret\""
-        )
-    else:
-        key = st.text_input("Enter admin key to access exports", type="password")
-        if key == ADMIN_KEY:
-            st.success("Admin unlocked.")
+    st.caption(f"Mode: {'Google Sheets' if SHEETS_MODE else 'Local CSV'}")
+    if not ADMIN_KEY:
+        st.info("To protect exports, set an ADMIN_KEY in Streamlit Secrets (optional).")
 
-            # Load all responses from Google Sheets (cached + retry)
-            try:
-                responses_df = fetch_responses_df()
-            except Exception as e:
-                st.error(f"Could not load responses from Google Sheets: {e}")
-                responses_df = pd.DataFrame()
-
-            st.write(f"Total submissions: **{len(responses_df)}**")
-
-            if not responses_df.empty:
-                st.dataframe(responses_df, use_container_width=True)
-                bytes_data, fname, mime = make_download_payload(responses_df)
-                st.download_button("Download all responses", data=bytes_data, file_name=fname, mime=mime)
-            else:
-                st.warning("No submissions yet.")
-
-            # Non-responders
-            st.markdown("### ❌ Non-responders")
-            nonresp_df = compute_nonresponders(serving_base, responses_df)
-
-            all_directors = ["All"] + sorted(serving_base["Director"].dropna().astype(str).str.strip().unique().tolist())
-            sel_dir = st.selectbox("Filter by director", options=all_directors, index=0)
-            view_df = nonresp_df if sel_dir == "All" else nonresp_df[nonresp_df["Director"] == sel_dir]
-
-            total_expected = len(serving_base[["Director", "Serving Girl"]].dropna().drop_duplicates())
-            st.write(f"Non-responders shown: **{len(view_df)}**  |  Total expected pairs: **{total_expected}**")
-
-            st.dataframe(view_df[["Director", "Serving Girl"]], use_container_width=True)
-
-            nr_bytes, nr_name, nr_mime = make_download_payload(view_df[["Director", "Serving Girl"]])
-            st.download_button("Download non-responders", data=nr_bytes, file_name="non_responders.xlsx", mime=nr_mime)
-
-        elif key:
+    key = st.text_input("Enter admin key to access exports", type="password")
+    if ADMIN_KEY and key != ADMIN_KEY:
+        if key:
             st.error("Incorrect admin key.")
+    else:
+        st.success("Admin unlocked.")
+
+        # Load responses from active store
+        try:
+            responses_df = fetch_responses_df_sheets() if SHEETS_MODE else fetch_responses_df_local()
+        except Exception as e:
+            st.error(f"Could not load responses: {e}")
+            responses_df = pd.DataFrame()
+
+        st.write(f"Total submissions: **{len(responses_df)}**")
+
+        if not responses_df.empty:
+            st.dataframe(responses_df, use_container_width=True)
+            bytes_data, fname, mime = make_download_payload(responses_df)
+            st.download_button("Download all responses", data=bytes_data, file_name=fname, mime=mime)
+        else:
+            st.warning("No submissions yet.")
+
+        st.markdown("### ❌ Non-responders")
+        nonresp_df = compute_nonresponders(serving_base, responses_df)
+        all_directors = ["All"] + sorted(serving_base["Director"].dropna().astype(str).str.strip().unique().tolist())
+        sel_dir = st.selectbox("Filter by director", options=all_directors, index=0)
+        view_df = nonresp_df if sel_dir == "All" else nonresp_df[nonresp_df["Director"] == sel_dir]
+        total_expected = len(serving_base[["Director", "Serving Girl"]].dropna().drop_duplicates())
+        st.write(f"Non-responders shown: **{len(view_df)}**  |  Total expected pairs: **{total_expected}**")
+        st.dataframe(view_df[["Director", "Serving Girl"]], use_container_width=True)
+        nr_bytes, nr_name, nr_mime = make_download_payload(view_df[["Director", "Serving Girl"]])
+        st.download_button("Download non-responders", data=nr_bytes, file_name="non_responders.xlsx", mime=nr_mime)
+
+        st.divider()
+
+        # ---------------------------------------------------------------------
+        # 🔍 Secrets / Sheets check (diagnostic)
+        # ---------------------------------------------------------------------
+        st.markdown("#### 🔍 Secrets / Sheets check")
+        try:
+            s = st.secrets
+            gsa = s.get("gcp_service_account", {})
+            gs_id = s.get("GSHEET_ID") or s.get("general", {}).get("GSHEET_ID")
+
+            st.write({
+                "has_gcp_service_account_block": bool(gsa),
+                "GSHEET_ID_present": bool(gs_id),
+                "client_email": gsa.get("client_email", "(missing)"),
+                "private_key_id_present": bool(gsa.get("private_key_id")),
+                "private_key_length": len(gsa.get("private_key", "")),
+                "gspread_installed": gspread is not None,
+            })
+
+            if gspread is None:
+                st.warning("gspread not installed. Add 'gspread' and 'google-auth' to requirements.txt and reboot.")
+            elif gsa and gs_id:
+                try:
+                    gc = gspread.service_account_from_dict(gsa)
+                    sh = gc.open_by_key(gs_id)
+                    st.success(f"✅ Auth OK. Opened sheet: {sh.title}")
+                except Exception as e:
+                    st.error(f"❌ Auth test error: {e}")
+            else:
+                st.info("Secrets incomplete. Ensure [gcp_service_account] block and GSHEET_ID are set, then reboot.")
+        except Exception as e:
+            st.error(f"❌ Diagnostics failed: {e}")

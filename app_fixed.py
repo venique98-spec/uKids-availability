@@ -9,13 +9,13 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-# gspread is required for Google Sheets mode; we keep this optional import so the app can still render
+# Try to import gspread (optional). If missing, app still runs in Local mode.
 try:
     import gspread
     from gspread.exceptions import APIError
 except Exception:
     gspread = None
-    class APIError(Exception): pass  # dummy for type use
+    class APIError(Exception): pass  # dummy so references compile
 
 # -----------------------------------------------------------------------------
 # APP CONFIG
@@ -46,11 +46,13 @@ DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 FQ_PATH = DATA_DIR / "Form questions.csv"
 SB_PATH = DATA_DIR / "Serving base with allocated directors.csv"
+LOCAL_RESP_PATH = DATA_DIR / "responses_local.csv"
 
 # -----------------------------------------------------------------------------
 # SECRETS / ADMIN KEY
 # -----------------------------------------------------------------------------
 def _get_secret_any(*paths):
+    """Return secrets value by trying several key paths (top-level or sectioned)."""
     try:
         cur = st.secrets
     except Exception:
@@ -110,6 +112,7 @@ REPORT_LABEL_COL = None  # set after load_data()
 def read_csv_local(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Missing file: {path}")
+    # Try multiple encodings and auto-delimiter
     for enc in ("utf-8-sig", "cp1252", "latin1", "utf-8"):
         try:
             return pd.read_csv(path, encoding=enc, sep=None, engine="python")
@@ -209,10 +212,8 @@ def fetch_responses_df_sheets() -> pd.DataFrame:
     return sheet_get_df(ws)
 
 # -----------------------------------------------------------------------------
-# LOCAL CSV FALLBACK HELPERS (not used if Sheets mode is working)
+# LOCAL CSV FALLBACK HELPERS (used if Sheets mode is off)
 # -----------------------------------------------------------------------------
-LOCAL_RESP_PATH = DATA_DIR / "responses_local.csv"
-
 def ensure_local_headers(desired_header: list[str]) -> list[str]:
     if not LOCAL_RESP_PATH.exists():
         pd.DataFrame(columns=desired_header).to_csv(LOCAL_RESP_PATH, index=False)
@@ -232,7 +233,6 @@ def ensure_local_headers(desired_header: list[str]) -> list[str]:
 
 def append_row_local(header: list[str], row_map: dict):
     row = {k: row_map.get(k, "") for k in header}
-    # append without race-conditions (simple approach)
     try:
         df = pd.read_csv(LOCAL_RESP_PATH)
     except Exception:
@@ -264,6 +264,7 @@ def clear_responses_cache():
 # REPORT HELPERS
 # -----------------------------------------------------------------------------
 def extract_date_from_label(label: str) -> str:
+    """Fallback: 'Are you available the 5th of October?' -> '5 October'."""
     m = re.search(r'(\d{1,2})(?:st|nd|rd|th)?\s+of\s+(October|Nov|November|Oct)', label, flags=re.I)
     if m:
         return f"{m.group(1)} October"
@@ -298,7 +299,8 @@ def build_human_report(form_questions: pd.DataFrame, answers: dict) -> str:
     for _, r in rows.iterrows():
         qid = str(r["QuestionID"])
         label = get_report_label(r)
-        val = (answers.get(qid) or "No").").title() if False else (answers.get(qid) or "No").title()  # safeguard
+        # FIXED: no stray characters; just title-case Yes/No
+        val = (answers.get(qid) or "No").title()
         lines.append(f"{label}: {val}")
     reason = (answers.get("Q7") or "").strip()
     if reason:
@@ -472,6 +474,7 @@ if submitted:
         except Exception as e:
             st.error(f"Failed to save submission: {e}")
 
+        # Text report for screenshot / sharing
         report_text = build_human_report(form_questions, answers)
         st.markdown("### 📄 Screenshot-friendly report (text)")
         st.code(report_text, language=None)
@@ -483,7 +486,7 @@ if submitted:
         )
 
 # -----------------------------------------------------------------------------
-# ADMIN (exports + non-responders)
+# ADMIN (exports + non-responders + diagnostics)
 # -----------------------------------------------------------------------------
 with st.expander("Admin"):
     st.caption(f"Mode: {'Google Sheets' if SHEETS_MODE else 'Local CSV'}")
@@ -525,16 +528,11 @@ with st.expander("Admin"):
         st.download_button("Download non-responders", data=nr_bytes, file_name="non_responders.xlsx", mime=nr_mime)
 
         st.divider()
-
-        # ---------------------------------------------------------------------
-        # 🔍 Secrets / Sheets check (diagnostic)
-        # ---------------------------------------------------------------------
         st.markdown("#### 🔍 Secrets / Sheets check")
         try:
             s = st.secrets
             gsa = s.get("gcp_service_account", {})
             gs_id = s.get("GSHEET_ID") or s.get("general", {}).get("GSHEET_ID")
-
             st.write({
                 "has_gcp_service_account_block": bool(gsa),
                 "GSHEET_ID_present": bool(gs_id),
@@ -543,7 +541,6 @@ with st.expander("Admin"):
                 "private_key_length": len(gsa.get("private_key", "")),
                 "gspread_installed": gspread is not None,
             })
-
             if gspread is None:
                 st.warning("gspread not installed. Add 'gspread' and 'google-auth' to requirements.txt and reboot.")
             elif gsa and gs_id:

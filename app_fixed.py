@@ -183,8 +183,11 @@ def get_worksheet():
     sa_dict = _get_secret_any(["gcp_service_account"], ["general", "gcp_service_account"])
     sheet_id = _get_secret_any(["GSHEET_ID"], ["general", "GSHEET_ID"])
     gc = gspread.service_account_from_dict(sa_dict)
-    sh = gs_retry(gc.open_by_key, sheet_id)
-    return sh.sheet1
+    try:
+        sh = gs_retry(gc.open_by_key, sheet_id)
+        return sh.sheet1
+    except Exception as e:
+        raise RuntimeError(f"Failed to open Google Sheet with ID '{sheet_id}': {e}. Please check that the sheet exists and is shared with your service account email.")
 
 @st.cache_resource
 def init_sheet_headers(desired_header: list[str]) -> list[str]:
@@ -502,7 +505,10 @@ with st.expander("Admin"):
 
         # Load responses from active store
         try:
-            responses_df = fetch_responses_df_sheets() if SHEETS_MODE else fetch_responses_df_local()
+            if SHEETS_MODE:
+                responses_df = fetch_responses_df_sheets()
+            else:
+                responses_df = fetch_responses_df_local()
         except Exception as e:
             st.error(f"Could not load responses: {e}")
             responses_df = pd.DataFrame()
@@ -536,6 +542,7 @@ with st.expander("Admin"):
             st.write({
                 "has_gcp_service_account_block": bool(gsa),
                 "GSHEET_ID_present": bool(gs_id),
+                "GSHEET_ID_value": gs_id[:20] + "..." if gs_id and len(gs_id) > 20 else gs_id,
                 "client_email": gsa.get("client_email", "(missing)"),
                 "private_key_id_present": bool(gsa.get("private_key_id")),
                 "private_key_length": len(gsa.get("private_key", "")),

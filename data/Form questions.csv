@@ -1,8 +1,10 @@
 QuestionID,QuestionText,Report Label,QuestionType,Options Source,DependsOn,Show Condition
-Q1,Please select your director’s name,Director,dropdown,directors,None,None
+Q1,Please select your directorâ€™s name,Director,dropdown,directors,None,None
 Q2,Please select your name,Serving Girl,dropdown,serving_girls,Q1,director={{answer}}
-Q3,Are you available the 5th of October?,5 October,radio,yes_no,None,None
-Q4,Are you available the 12th of October?,12 October,radio,yes_no,None,None
-Q5,Are you available the 19th of October?,19 October,05-Oct,yes_no,None,None
-Q6,Are you available the 26th of October?,26 October,radio,yes_no,None,None
-Q7,Please provide a valid reason why you cannot serve twice this month,Reason,text,None,"Q3,Q4,Q5,Q6",yes_count<2
+Q3,Are you available 2 November?,2 November,radio,yes_no,None,None
+Q4,Are you available 9 November?,9 November,radio,yes_no,None,None
+Q5,Are you available 16 November?,16 November,05-Oct,yes_no,None,None
+Q6,Are you available 23 November?,23 November,radio,yes_no,None,None
+Q7,Are you available 30 November?,30 November,radio,yes_no,None,None
+Q8,Please provide a valid reason why you cannot serve three times this month,Reason,text,None,"Q3,Q4,Q5,Q6,Q7",yes_count<3
+

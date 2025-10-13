@@ -394,7 +394,7 @@ if answers.get("Q1"):
 else:
     answers["Q2"] = ""
 
-st.subheader("Availability in October")
+st.subheader("Availability in November")
 availability_questions = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"].copy()
 
 for _, q in availability_questions.iterrows():

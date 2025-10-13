@@ -169,7 +169,6 @@ def load_data():
     if missing_sb:
         raise RuntimeError(f"`Serving base with allocated directors.csv` missing columns: {', '.join(sorted(missing_sb))}")
 
-    # safe access using get_col
     fq = fq.assign(
         **{
             get_col(fq, "QuestionID"): fq[get_col(fq, "QuestionID")].astype(str).str.strip(),
@@ -654,7 +653,7 @@ with st.expander("Admin"):
             if responses_df is None or responses_df.empty:
                 out = sb.copy()
                 out["Responded"] = False
-                out["Last submission"] = ""
+                out["Last submission"] = pd.NaT
                 return out
 
             cols = list(responses_df.columns)
@@ -672,8 +671,8 @@ with st.expander("Admin"):
             resp = resp.sort_values("Last submission").drop_duplicates(subset=["Director", "Serving Girl"], keep="last")
 
             merged = sb.merge(resp, on=["Director", "Serving Girl"], how="left")
-            merged["Responded"] = merged["Last submission"].notna()
-            nonresp = merged[!merged["Responded"]].copy()
+            merged["Responded"] = merged["Last submission"].notna().fillna(False)
+            nonresp = merged.loc[~merged["Responded"]].copy()
             return nonresp.sort_values(["Director", "Serving Girl"]).reset_index(drop=True)
 
         nonresp_df = compute_nonresponders(serving_base, responses_df)

@@ -15,13 +15,13 @@ try:
     from gspread.exceptions import APIError
 except Exception:
     gspread = None
-    class APIError(Exception): pass  # dummy so references compile
-
+    class APIError(Exception): ...
 # -----------------------------------------------------------------------------
 # APP CONFIG
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="Availability Form", page_icon="🗓️", layout="centered")
 st.title("🗓️ Availability Form")
+
 
 def apply_mobile_tweaks():
     st.markdown("""
@@ -30,7 +30,29 @@ def apply_mobile_tweaks():
       label[data-baseweb="radio"] { padding: 6px 0; }
       @media (max-width: 520px){
         div[data-testid="column"] { width: 100% !important; flex: 0 0 100% !important; }
-        pre, code { font-size: 15px; line-height: 1.35; }
+        pre, code {
+          white-space: pre-wrap !important;
+          word-break: break-word !important;
+          overflow-wrap: anywhere !important;
+          font-size: 16px; line-height: 1.45;
+        }
+      }
+      /* Screenshot-friendly report */
+      .report-box {
+        white-space: pre-wrap;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+        font-size: 16px;
+        line-height: 1.5;
+        padding: 12px 14px;
+        background: #0e1117;
+        color: #e6edf3;
+        border-radius: 8px;
+        border: 1px solid #2d333b;
+      }
+      @media (max-width: 520px){
+        .report-box { font-size: 17px; line-height: 1.6; padding: 14px; }
       }
       .sticky-submit {
         position: sticky; bottom: 0; z-index: 999;
@@ -87,7 +109,7 @@ def is_sheets_enabled() -> bool:
 SHEETS_MODE = is_sheets_enabled()
 
 # -----------------------------------------------------------------------------
-# COLUMN NORMALIZATION
+# COLUMN NORMALIZATION HELPERS
 # -----------------------------------------------------------------------------
 def _norm_col(s: str) -> str:
     return str(s).replace("\u00A0", " ").replace("\u200B", "").strip().lower()
@@ -103,6 +125,14 @@ def pick_report_label_col(df: pd.DataFrame):
         if cand in cmap:
             return cmap[cand]
     return None
+
+def has_cols(df: pd.DataFrame, required: set[str]) -> set[str]:
+    low = {_norm_col(c) for c in df.columns}
+    return {c for c in required if _norm_col(c) not in low}
+
+def get_col(df: pd.DataFrame, name: str) -> str:
+    cmap = {_norm_col(c): c for c in df.columns}
+    return cmap.get(_norm_col(name), name)
 
 REPORT_LABEL_COL = None  # set after load_data()
 
@@ -130,28 +160,29 @@ def load_data():
     sb = normalize_columns(sb)
 
     required_fq = {"QuestionID", "QuestionText", "QuestionType", "Options Source", "DependsOn", "Show Condition"}
-    missing_fq = required_fq - set(fq.columns)
+    missing_fq = has_cols(fq, required_fq)
     if missing_fq:
         raise RuntimeError(f"`Form questions.csv` missing columns: {', '.join(sorted(missing_fq))}")
 
     required_sb = {"Director", "Serving Girl"}
-    missing_sb = required_sb - set(sb.columns)
+    missing_sb = has_cols(sb, required_sb)
     if missing_sb:
         raise RuntimeError(f"`Serving base with allocated directors.csv` missing columns: {', '.join(sorted(missing_sb))}")
 
+    # safe access using get_col
     fq = fq.assign(
-        QuestionID=fq["QuestionID"].astype(str).str.strip(),
-        QuestionText=fq["QuestionText"].astype(str).str.strip(),
-        QuestionType=fq["QuestionType"].astype(str).str.strip(),
         **{
-            "Options Source": fq["Options Source"].astype(str).str.strip(),
-            "DependsOn": fq["DependsOn"].astype(str).str.strip(),
-            "Show Condition": fq["Show Condition"].astype(str).str.strip(),
+            get_col(fq, "QuestionID"): fq[get_col(fq, "QuestionID")].astype(str).str.strip(),
+            get_col(fq, "QuestionText"): fq[get_col(fq, "QuestionText")].astype(str).str.strip(),
+            get_col(fq, "QuestionType"): fq[get_col(fq, "QuestionType")].astype(str).str.strip(),
+            get_col(fq, "Options Source"): fq[get_col(fq, "Options Source")].astype(str).str.strip(),
+            get_col(fq, "DependsOn"): fq[get_col(fq, "DependsOn")].astype(str).str.strip(),
+            get_col(fq, "Show Condition"): fq[get_col(fq, "Show Condition")].astype(str).str.strip(),
         }
     )
     sb = sb.assign(
-        Director=sb["Director"].astype(str).str.strip(),
-        **{"Serving Girl": sb["Serving Girl"].astype(str).str.strip()}
+        Director=sb[get_col(sb, "Director")].astype(str).str.strip(),
+        **{"Serving Girl": sb[get_col(sb, "Serving Girl")].astype(str).str.strip()}
     )
 
     serving_map = (
@@ -283,6 +314,7 @@ def extract_date_from_label(label: str) -> str:
         "jul": "July", "july": "July",
         "aug": "August", "august": "August",
         "sep": "September", "september": "September",
+        "sept": "September",
         "oct": "October", "october": "October",
         "nov": "November", "november": "November",
         "dec": "December", "december": "December",
@@ -303,11 +335,11 @@ def get_report_label(row) -> str:
     global REPORT_LABEL_COL
     if REPORT_LABEL_COL and REPORT_LABEL_COL in row and str(row[REPORT_LABEL_COL]).strip():
         return str(row[REPORT_LABEL_COL]).strip()
-    return extract_date_from_label(str(row.get("QuestionText", "")).strip())
+    return extract_date_from_label(str(row.get(get_col(form_questions, "QuestionText"), "")).strip())
 
 def yesno_labels(form_questions: pd.DataFrame) -> list[str]:
     labels = []
-    rows = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"]
+    rows = form_questions[form_questions[get_col(form_questions, "Options Source")].astype(str).str.lower() == "yes_no"]
     for _, r in rows.iterrows():
         lbl = get_report_label(r)
         if lbl not in labels:
@@ -319,14 +351,13 @@ def yes_count(answers: dict, ids):
 
 # ----- Reason question helpers (dynamic, based on your CSV) -------------------
 def find_reason_row(form_questions: pd.DataFrame):
-    # Prefer explicit Report Label 'Reason'
-    rl = form_questions.get("Report Label")
-    if rl is not None:
-        mask = rl.astype(str).str.strip().str.lower() == "reason"
+    rl_col = get_col(form_questions, "Report Label")
+    if rl_col is not None and rl_col in form_questions.columns:
+        mask = form_questions[rl_col].astype(str).str.strip().str.lower() == "reason"
         if mask.any():
             return form_questions[mask].iloc[0]
     # Fallback: first text question
-    mask_text = form_questions["QuestionType"].astype(str).str.lower() == "text"
+    mask_text = form_questions[get_col(form_questions, "QuestionType")].astype(str).str.lower() == "text"
     if mask_text.any():
         return form_questions[mask_text].iloc[0]
     return None  # no reason question present
@@ -334,13 +365,13 @@ def find_reason_row(form_questions: pd.DataFrame):
 def parse_yescount_condition(cond_str: str):
     """
     Parse patterns like: 'yes_count<3', 'yes_count<=2', 'yes_count==2', 'yes_count>=4'
-    Returns (operator, threshold). Defaults to ('<', 2) if not parsable.
+    Returns (operator, threshold). Defaults to ('>=', 1) if not provided.
     """
-    if not cond_str:
-        return "<", 2
+    if not cond_str or not cond_str.strip():
+        return ">=", 1
     m = re.search(r'yes_count\s*(<=|<|>=|>|==|=)\s*(\d+)', str(cond_str).strip(), flags=re.I)
     if not m:
-        return "<", 2
+        return ">=", 1
     op = m.group(1)
     if op == "=": op = "=="
     threshold = int(m.group(2))
@@ -352,7 +383,7 @@ def eval_yescount_condition(yes_ct: int, op: str, n: int) -> bool:
     if op == ">":  return yes_ct > n
     if op == ">=": return yes_ct >= n
     if op == "==": return yes_ct == n
-    return yes_ct < n
+    return yes_ct >= n
 
 # -----------------------------------------------------------------------------
 # LOAD DATA
@@ -373,10 +404,10 @@ REPORT_LABEL_COL = pick_report_label_col(form_questions)
 if not REPORT_LABEL_COL:
     st.warning("No 'Report Label' column found (exact match not detected). Using auto-detected labels.")
 
-# Cache reason row + id (FIX: avoid ambiguous Series truth-value)
+# Cache reason row + id
 _REASON_ROW = find_reason_row(form_questions)
 if _REASON_ROW is not None:
-    REASON_QID = str(_REASON_ROW["QuestionID"])
+    REASON_QID = str(_REASON_ROW[get_col(form_questions, "QuestionID")])
 else:
     REASON_QID = None
 
@@ -402,36 +433,48 @@ else:
     answers["Q2"] = ""
 
 st.subheader("Availability in November")
-availability_questions = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"].copy()
+availability_questions = form_questions[
+    form_questions[get_col(form_questions, "Options Source")].astype(str).str.lower() == "yes_no"
+].copy()
 
+# Radios with placeholder (no default "No")
 for _, q in availability_questions.iterrows():
-    qid = str(q["QuestionID"])
-    qtext = str(q["QuestionText"])
-    current = answers.get(qid)
-    idx = 0 if current == "Yes" else 1 if current == "No" else 1
-    choice = st.radio(qtext, ["Yes", "No"], index=idx, key=qid, horizontal=False)
-    answers[qid] = choice
+    qid = str(q[get_col(form_questions, "QuestionID")])
+    qtext = str(q[get_col(form_questions, "QuestionText")])
+    options = ["—", "Yes", "No"]
+    current = answers.get(qid, "")
+    idx = options.index(current) if current in ("Yes", "No") else 0
+    choice = st.radio(qtext, options, index=idx, key=qid, horizontal=False)
+    answers[qid] = "" if choice == "—" else choice
 
 # ----- Conditional REASON (dynamic) ------------------------------------------
 dep_ids = []
+show_reason = False
 if _REASON_ROW is not None:
-    reason_text = str(_REASON_ROW["QuestionText"])
+    reason_text = str(_REASON_ROW[get_col(form_questions, "QuestionText")])
     # DependsOn parsing
-    dep_ids = [s.strip() for s in str(_REASON_ROW.get("DependsOn", "")).split(",") if s.strip()]
-    op, threshold = parse_yescount_condition(str(_REASON_ROW.get("Show Condition", "")))
+    dep_ids = [s.strip() for s in str(_REASON_ROW.get(get_col(form_questions, "DependsOn"), "")).split(",") if s.strip()]
 
-    # Evaluate condition against current answers
+    # Fallback to all yes/no question IDs if DependsOn empty
+    if not dep_ids:
+        dep_ids = form_questions.loc[
+            form_questions[get_col(form_questions, "Options Source")].astype(str).str.lower() == "yes_no",
+            get_col(form_questions, "QuestionID")
+        ].astype(str).tolist()
+
+    op, threshold = parse_yescount_condition(str(_REASON_ROW.get(get_col(form_questions, "Show Condition"), "")))
     show_reason = eval_yescount_condition(yes_count(answers, dep_ids), op, threshold)
 
     if show_reason:
         answers[REASON_QID] = st.text_area(reason_text, value=answers.get(REASON_QID, ""))
     else:
-        # preserve prior text but don't render the input
         answers[REASON_QID] = answers.get(REASON_QID, "")
 
 # Review
 st.subheader("Review")
-yes_ids = form_questions[form_questions["Options Source"].str.lower() == "yes_no"]["QuestionID"].astype(str).tolist()
+yes_ids = form_questions[
+    form_questions[get_col(form_questions, "Options Source")].str.lower() == "yes_no"
+][get_col(form_questions, "QuestionID")].astype(str).tolist()
 c1, c2, c3 = st.columns(3)
 with c1: st.metric("Director", answers.get("Q1") or "—")
 with c2: st.metric("Name", answers.get("Q2") or "—")
@@ -451,10 +494,21 @@ if submitted:
     if not answers.get("Q2"):
         errors["Q2"] = "Please select your name."
 
-    # Validate Reason only if we have a reason row and the condition requires it
+    # Ensure all availability questions answered
+    unanswered = [
+        str(r[get_col(form_questions, "QuestionID")])
+        for _, r in availability_questions.iterrows()
+        if not answers.get(str(r[get_col(form_questions, "QuestionID")]))
+    ]
+    if unanswered:
+        errors["unanswered"] = "Please answer all availability items."
+
+    # Validate Reason only if condition requires it
     if _REASON_ROW is not None:
-        op, threshold = parse_yescount_condition(str(_REASON_ROW.get("Show Condition", "")))
-        dep_ids = [s.strip() for s in str(_REASON_ROW.get("DependsOn", "")).split(",") if s.strip()]
+        dep_ids = [s.strip() for s in str(_REASON_ROW.get(get_col(form_questions, "DependsOn"), "")).split(",") if s.strip()]
+        if not dep_ids:
+            dep_ids = yes_ids
+        op, threshold = parse_yescount_condition(str(_REASON_ROW.get(get_col(form_questions, "Show Condition"), "")))
         need_reason = eval_yescount_condition(yes_count(answers, dep_ids), op, threshold)
         if need_reason:
             if not answers.get(REASON_QID) or len(str(answers[REASON_QID]).strip()) < 5:
@@ -465,43 +519,44 @@ if submitted:
             st.error(v)
     else:
         now = datetime.utcnow().isoformat() + "Z"
-        labels = yesno_labels(form_questions)
+
+        # Build labels directly from the questions we're saving from (avoid drift)
+        labels_in_use = []
+        for _, r in availability_questions.iterrows():
+            lbl = get_report_label(r)
+            if lbl not in labels_in_use:
+                labels_in_use.append(lbl)
+        if len(set(labels_in_use)) != len(labels_in_use):
+            st.warning("Some availability labels are duplicated; headers may clash.")
+
         row_map = {
             "timestamp": now,
             "Director": answers.get("Q1") or "",
             "Serving Girl": answers.get("Q2") or "",
         }
 
-        # Reason column name: prefer Report Label 'Reason', else literal 'Reason'
+        # Stable Reason column name
         reason_col_name = "Reason"
-        if _REASON_ROW is not None:
-            # Try to pull the value from the actual report label column if present
-            if REPORT_LABEL_COL and REPORT_LABEL_COL in _REASON_ROW:
-                tmp = str(_REASON_ROW[REPORT_LABEL_COL]).strip()
-                if tmp:
-                    reason_col_name = tmp
-            else:
-                tmp = str(_REASON_ROW.get("Report Label", "")).strip()
-                if tmp:
-                    reason_col_name = tmp
         row_map[reason_col_name] = str(answers.get(REASON_QID, "")).strip() if _REASON_ROW is not None else ""
 
+        # Save the Yes/No values (we already required all answered)
         for _, r in availability_questions.iterrows():
-            qid = str(r["QuestionID"])
+            qid = str(r[get_col(form_questions, "QuestionID")])
             label = get_report_label(r)
-            row_map[label] = (answers.get(qid) or "No").title()
+            val = (answers.get(qid) or "").title()  # "Yes" / "No"
+            row_map[label] = val
+
+        desired_header = ["timestamp", "Director", "Serving Girl", reason_col_name] + labels_in_use
 
         try:
             if SHEETS_MODE:
                 ws = get_worksheet()
-                desired_header = ["timestamp", "Director", "Serving Girl", reason_col_name] + labels
                 header = init_sheet_headers(desired_header)
                 row = [row_map.get(col, "") for col in header]
                 gs_retry(ws.append_row, row)
                 clear_responses_cache()
                 st.success("Submission saved to Google Sheets.")
             else:
-                desired_header = ["timestamp", "Director", "Serving Girl", reason_col_name] + labels
                 header = ensure_local_headers(desired_header)
                 append_row_local(header, row_map)
                 clear_responses_cache()
@@ -509,27 +564,30 @@ if submitted:
         except Exception as e:
             st.error(f"Failed to save submission: {e}")
 
-        # Text report for screenshot / sharing
+        # Text report for screenshot / sharing (mobile-wrapped)
         def build_human_report(form_questions: pd.DataFrame, answers: dict) -> str:
             director = answers.get("Q1") or "—"
             name = answers.get("Q2") or "—"
             lines = [f"Director: {director}", f"Serving Girl: {name}", "Availability:"]
-            rows = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"]
+            rows = form_questions[form_questions[get_col(form_questions, "Options Source")].astype(str).str.lower() == "yes_no"]
             for _, r in rows.iterrows():
-                qid = str(r["QuestionID"])
+                qid = str(r[get_col(form_questions, "QuestionID")])
                 label = get_report_label(r)
-                val = (answers.get(qid) or "No").title()
+                val = (answers.get(qid) or "").title()
                 lines.append(f"{label}: {val}")
-            # Reason (dynamic)
+            # Reason (if present)
             if _REASON_ROW is not None:
                 reason_text_val = (answers.get(REASON_QID) or "").strip()
                 if reason_text_val:
-                    lines.append(f"{reason_col_name}: {reason_text_val}")
+                    lines.append(f"Reason: {reason_text_val}")
             return "\n".join(lines)
 
         report_text = build_human_report(form_questions, answers)
         st.markdown("### 📄 Screenshot-friendly report (text)")
-        st.code(report_text, language=None)
+
+        from html import escape
+        st.markdown(f'<pre class="report-box">{escape(report_text)}</pre>', unsafe_allow_html=True)
+
         st.download_button(
             "Download report as .txt",
             data=report_text.encode("utf-8"),
@@ -608,11 +666,14 @@ with st.expander("Admin"):
             resp.rename(columns={ts_col: "Last submission"}, inplace=True)
             resp["Director"] = resp["Director"].astype(str).str.strip()
             resp["Serving Girl"] = resp["Serving Girl"].astype(str).str.strip()
+
+            # Coerce timestamp for proper sorting
+            resp["Last submission"] = pd.to_datetime(resp["Last submission"], errors="coerce")
             resp = resp.sort_values("Last submission").drop_duplicates(subset=["Director", "Serving Girl"], keep="last")
 
             merged = sb.merge(resp, on=["Director", "Serving Girl"], how="left")
-            merged["Responded"] = merged["Last submission"].notna() & (merged["Last submission"] != "")
-            nonresp = merged[~merged["Responded"]].copy()
+            merged["Responded"] = merged["Last submission"].notna()
+            nonresp = merged[!merged["Responded"]].copy()
             return nonresp.sort_values(["Director", "Serving Girl"]).reset_index(drop=True)
 
         nonresp_df = compute_nonresponders(serving_base, responses_df)

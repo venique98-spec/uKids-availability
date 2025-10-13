@@ -267,14 +267,51 @@ def clear_responses_cache():
 # REPORT HELPERS
 # -----------------------------------------------------------------------------
 def extract_date_from_label(label: str) -> str:
-    """Fallback: 'Are you available the 5th of October?' -> '5 October'."""
-    m = re.search(r'(\d{1,2})(?:st|nd|rd|th)?\s+of\s+(October|Nov|November|Oct)', label, flags=re.I)
+    """
+    Fallback: convert question text like
+    'Are you available the 5th of November?' -> '5 November'
+    or 'Are you available 5 November?' -> '5 November'
+    """
+    text = str(label).strip()
+
+    # Map common month spellings/abbreviations to full names
+    month_map = {
+        "jan": "January", "january": "January",
+        "feb": "February", "february": "February",
+        "mar": "March", "march": "March",
+        "apr": "April", "april": "April",
+        "may": "May",
+        "jun": "June", "june": "June",
+        "jul": "July", "july": "July",
+        "aug": "August", "august": "August",
+        "sep": "September", "september": "September",
+        "oct": "October", "october": "October",
+        "nov": "November", "november": "November",
+        "dec": "December", "december": "December",
+    }
+
+    # 1) e.g. "5th of November"
+    m = re.search(
+        r'(\d{1,2})(?:st|nd|rd|th)?\s+of\s+([A-Za-z]+)',
+        text, flags=re.I
+    )
     if m:
-        return f"{m.group(1)} October"
-    m2 = re.search(r'(\d{1,2})\s+(October)', label, flags=re.I)
+        day = m.group(1)
+        mon = month_map.get(m.group(2).lower(), m.group(2).title())
+        return f"{day} {mon}"
+
+    # 2) e.g. "5 November"
+    m2 = re.search(
+        r'(\d{1,2})\s+([A-Za-z]+)',
+        text, flags=re.I
+    )
     if m2:
-        return f"{m2.group(1)} {m2.group(2).title()}"
-    return label.strip()
+        day = m2.group(1)
+        mon = month_map.get(m2.group(2).lower(), m2.group(2).title())
+        return f"{day} {mon}"
+
+    # No recognizable pattern: return original label
+    return text
 
 def get_report_label(row) -> str:
     global REPORT_LABEL_COL

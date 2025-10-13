@@ -320,15 +320,15 @@ def yes_count(answers: dict, ids):
 # ----- Reason question helpers (dynamic, based on your CSV) -------------------
 def find_reason_row(form_questions: pd.DataFrame):
     # Prefer explicit Report Label 'Reason'
-    mask_label = form_questions.get("Report Label", pd.Series(dtype=str)).astype(str).str.strip().str.lower() == "reason"
-    if mask_label.any():
-        return form_questions[mask_label].iloc[0]
-
+    rl = form_questions.get("Report Label")
+    if rl is not None:
+        mask = rl.astype(str).str.strip().str.lower() == "reason"
+        if mask.any():
+            return form_questions[mask].iloc[0]
     # Fallback: first text question
     mask_text = form_questions["QuestionType"].astype(str).str.lower() == "text"
     if mask_text.any():
         return form_questions[mask_text].iloc[0]
-
     return None  # no reason question present
 
 def parse_yescount_condition(cond_str: str):
@@ -352,7 +352,6 @@ def eval_yescount_condition(yes_ct: int, op: str, n: int) -> bool:
     if op == ">":  return yes_ct > n
     if op == ">=": return yes_ct >= n
     if op == "==": return yes_ct == n
-    # default safety
     return yes_ct < n
 
 # -----------------------------------------------------------------------------
@@ -374,10 +373,12 @@ REPORT_LABEL_COL = pick_report_label_col(form_questions)
 if not REPORT_LABEL_COL:
     st.warning("No 'Report Label' column found (exact match not detected). Using auto-detected labels.")
 
-# Cache reason row + ids
+# Cache reason row + id (FIX: avoid ambiguous Series truth-value)
 _REASON_ROW = find_reason_row(form_questions)
-REASON_QID = str(_Reason_ROW["QuestionID"]) if (_REASON_ROW := _REASON_ROW) else None  # noqa: E701
-# (The above line keeps mypy/flake8 happy in single-file scripts)
+if _REASON_ROW is not None:
+    REASON_QID = str(_REASON_ROW["QuestionID"])
+else:
+    REASON_QID = None
 
 # -----------------------------------------------------------------------------
 # STATE
@@ -415,13 +416,11 @@ for _, q in availability_questions.iterrows():
 dep_ids = []
 if _REASON_ROW is not None:
     reason_text = str(_REASON_ROW["QuestionText"])
-    REASON_QID = str(_REASON_ROW["QuestionID"])
     # DependsOn parsing
     dep_ids = [s.strip() for s in str(_REASON_ROW.get("DependsOn", "")).split(",") if s.strip()]
     op, threshold = parse_yescount_condition(str(_REASON_ROW.get("Show Condition", "")))
 
     # Evaluate condition against current answers
-    # Show textarea if condition evaluates True (matching your "yes_count<3" style)
     show_reason = eval_yescount_condition(yes_count(answers, dep_ids), op, threshold)
 
     if show_reason:
@@ -472,12 +471,19 @@ if submitted:
             "Director": answers.get("Q1") or "",
             "Serving Girl": answers.get("Q2") or "",
         }
+
         # Reason column name: prefer Report Label 'Reason', else literal 'Reason'
         reason_col_name = "Reason"
         if _REASON_ROW is not None:
-            rr_label = str(_REASON_ROW.get(REPORT_LABEL_COL or "Report Label", "")).strip()
-            if rr_label:
-                reason_col_name = rr_label
+            # Try to pull the value from the actual report label column if present
+            if REPORT_LABEL_COL and REPORT_LABEL_COL in _REASON_ROW:
+                tmp = str(_REASON_ROW[REPORT_LABEL_COL]).strip()
+                if tmp:
+                    reason_col_name = tmp
+            else:
+                tmp = str(_REASON_ROW.get("Report Label", "")).strip()
+                if tmp:
+                    reason_col_name = tmp
         row_map[reason_col_name] = str(answers.get(REASON_QID, "")).strip() if _REASON_ROW is not None else ""
 
         for _, r in availability_questions.iterrows():
@@ -560,7 +566,8 @@ with st.expander("Admin"):
 
         if not responses_df.empty:
             st.dataframe(responses_df, use_container_width=True)
-            # export
+
+            # Export helper
             def make_download_payload(df: pd.DataFrame):
                 try:
                     import openpyxl  # noqa
@@ -615,6 +622,7 @@ with st.expander("Admin"):
         total_expected = len(serving_base[["Director", "Serving Girl"]].dropna().drop_duplicates())
         st.write(f"Non-responders shown: **{len(view_df)}**  |  Total expected pairs: **{total_expected}**")
         st.dataframe(view_df[["Director", "Serving Girl"]], use_container_width=True)
+
         # export NR
         def make_download_payload2(df: pd.DataFrame):
             try:
@@ -626,6 +634,7 @@ with st.expander("Admin"):
             except Exception:
                 csv_bytes = df.to_csv(index=False).encode("utf-8")
                 return csv_bytes, "non_responders.csv", "text/csv"
+
         nr_bytes, nr_name, nr_mime = make_download_payload2(view_df[["Director", "Serving Girl"]])
         st.download_button("Download non-responders", data=nr_bytes, file_name=nr_name, mime=nr_mime)
 

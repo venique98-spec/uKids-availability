@@ -264,7 +264,7 @@ def clear_responses_cache():
         pass
 
 # -----------------------------------------------------------------------------
-# REPORT HELPERS
+# REPORT / LABEL HELPERS
 # -----------------------------------------------------------------------------
 def extract_date_from_label(label: str) -> str:
     """
@@ -273,8 +273,6 @@ def extract_date_from_label(label: str) -> str:
     or 'Are you available 5 November?' -> '5 November'
     """
     text = str(label).strip()
-
-    # Map common month spellings/abbreviations to full names
     month_map = {
         "jan": "January", "january": "January",
         "feb": "February", "february": "February",
@@ -289,28 +287,16 @@ def extract_date_from_label(label: str) -> str:
         "nov": "November", "november": "November",
         "dec": "December", "december": "December",
     }
-
-    # 1) e.g. "5th of November"
-    m = re.search(
-        r'(\d{1,2})(?:st|nd|rd|th)?\s+of\s+([A-Za-z]+)',
-        text, flags=re.I
-    )
+    m = re.search(r'(\d{1,2})(?:st|nd|rd|th)?\s+of\s+([A-Za-z]+)', text, flags=re.I)
     if m:
         day = m.group(1)
         mon = month_map.get(m.group(2).lower(), m.group(2).title())
         return f"{day} {mon}"
-
-    # 2) e.g. "5 November"
-    m2 = re.search(
-        r'(\d{1,2})\s+([A-Za-z]+)',
-        text, flags=re.I
-    )
+    m2 = re.search(r'(\d{1,2})\s+([A-Za-z]+)', text, flags=re.I)
     if m2:
         day = m2.group(1)
         mon = month_map.get(m2.group(2).lower(), m2.group(2).title())
         return f"{day} {mon}"
-
-    # No recognizable pattern: return original label
     return text
 
 def get_report_label(row) -> str:
@@ -331,65 +317,43 @@ def yesno_labels(form_questions: pd.DataFrame) -> list[str]:
 def yes_count(answers: dict, ids):
     return sum(1 for qid in ids if str(answers.get(qid, "")).lower() == "yes")
 
-def build_human_report(form_questions: pd.DataFrame, answers: dict) -> str:
-    director = answers.get("Q1") or "—"
-    name = answers.get("Q2") or "—"
-    lines = [f"Director: {director}", f"Serving Girl: {name}", "Availability:"]
-    rows = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"]
-    for _, r in rows.iterrows():
-        qid = str(r["QuestionID"])
-        label = get_report_label(r)
-        # FIXED: no stray characters; just title-case Yes/No
-        val = (answers.get(qid) or "No").title()
-        lines.append(f"{label}: {val}")
-    reason = (answers.get("Q7") or "").strip()
-    if reason:
-        lines.append(f"Reason: {reason}")
-    return "\n".join(lines)
+# ----- Reason question helpers (dynamic, based on your CSV) -------------------
+def find_reason_row(form_questions: pd.DataFrame):
+    # Prefer explicit Report Label 'Reason'
+    mask_label = form_questions.get("Report Label", pd.Series(dtype=str)).astype(str).str.strip().str.lower() == "reason"
+    if mask_label.any():
+        return form_questions[mask_label].iloc[0]
 
-def make_download_payload(df: pd.DataFrame):
-    try:
-        import openpyxl  # noqa
-        out = BytesIO()
-        with pd.ExcelWriter(out, engine="openpyxl") as xw:
-            df.to_excel(xw, index=False, sheet_name="Responses")
-        return out.getvalue(), "uKids_availability_responses.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    except Exception:
-        csv_bytes = df.to_csv(index=False).encode("utf-8")
-        return csv_bytes, "uKids_availability_responses.csv", "text/csv"
+    # Fallback: first text question
+    mask_text = form_questions["QuestionType"].astype(str).str.lower() == "text"
+    if mask_text.any():
+        return form_questions[mask_text].iloc[0]
 
-# -----------------------------------------------------------------------------
-# NON-RESPONDERS
-# -----------------------------------------------------------------------------
-def compute_nonresponders(serving_base_df: pd.DataFrame, responses_df: pd.DataFrame) -> pd.DataFrame:
-    if serving_base_df is None or serving_base_df.empty:
-        return pd.DataFrame(columns=["Director", "Serving Girl"])
-    sb = serving_base_df[["Director", "Serving Girl"]].copy()
-    sb["Director"] = sb["Director"].astype(str).str.strip()
-    sb["Serving Girl"] = sb["Serving Girl"].astype(str).str.strip()
-    sb = sb[(sb["Director"] != "") & (sb["Serving Girl"] != "")].drop_duplicates()
+    return None  # no reason question present
 
-    if responses_df is None or responses_df.empty:
-        out = sb.copy()
-        out["Responded"] = False
-        out["Last submission"] = ""
-        return out
+def parse_yescount_condition(cond_str: str):
+    """
+    Parse patterns like: 'yes_count<3', 'yes_count<=2', 'yes_count==2', 'yes_count>=4'
+    Returns (operator, threshold). Defaults to ('<', 2) if not parsable.
+    """
+    if not cond_str:
+        return "<", 2
+    m = re.search(r'yes_count\s*(<=|<|>=|>|==|=)\s*(\d+)', str(cond_str).strip(), flags=re.I)
+    if not m:
+        return "<", 2
+    op = m.group(1)
+    if op == "=": op = "=="
+    threshold = int(m.group(2))
+    return op, threshold
 
-    cols = list(responses_df.columns)
-    ts_col = "timestamp" if "timestamp" in cols else (cols[0] if cols else "timestamp")
-    use_cols = [c for c in cols if c in ["Director", "Serving Girl"] or c == ts_col]
-    resp = responses_df[use_cols].copy()
-    if ts_col not in resp.columns:
-        resp[ts_col] = ""
-    resp.rename(columns={ts_col: "Last submission"}, inplace=True)
-    resp["Director"] = resp["Director"].astype(str).str.strip()
-    resp["Serving Girl"] = resp["Serving Girl"].astype(str).str.strip()
-    resp = resp.sort_values("Last submission").drop_duplicates(subset=["Director", "Serving Girl"], keep="last")
-
-    merged = sb.merge(resp, on=["Director", "Serving Girl"], how="left")
-    merged["Responded"] = merged["Last submission"].notna() & (merged["Last submission"] != "")
-    nonresp = merged[~merged["Responded"]].copy()
-    return nonresp.sort_values(["Director", "Serving Girl"]).reset_index(drop=True)
+def eval_yescount_condition(yes_ct: int, op: str, n: int) -> bool:
+    if op == "<":  return yes_ct < n
+    if op == "<=": return yes_ct <= n
+    if op == ">":  return yes_ct > n
+    if op == ">=": return yes_ct >= n
+    if op == "==": return yes_ct == n
+    # default safety
+    return yes_ct < n
 
 # -----------------------------------------------------------------------------
 # LOAD DATA
@@ -409,6 +373,11 @@ except Exception as e:
 REPORT_LABEL_COL = pick_report_label_col(form_questions)
 if not REPORT_LABEL_COL:
     st.warning("No 'Report Label' column found (exact match not detected). Using auto-detected labels.")
+
+# Cache reason row + ids
+_REASON_ROW = find_reason_row(form_questions)
+REASON_QID = str(_Reason_ROW["QuestionID"]) if (_REASON_ROW := _REASON_ROW) else None  # noqa: E701
+# (The above line keeps mypy/flake8 happy in single-file scripts)
 
 # -----------------------------------------------------------------------------
 # STATE
@@ -442,17 +411,24 @@ for _, q in availability_questions.iterrows():
     choice = st.radio(qtext, ["Yes", "No"], index=idx, key=qid, horizontal=False)
     answers[qid] = choice
 
-# Conditional Q7
-q7_row = form_questions[form_questions["QuestionID"].astype(str) == "Q7"]
+# ----- Conditional REASON (dynamic) ------------------------------------------
 dep_ids = []
-if not q7_row.empty:
-    q7 = q7_row.iloc[0]
-    q7_text = str(q7["QuestionText"])
-    dep_ids = [s.strip() for s in str(q7["DependsOn"]).split(",") if s.strip()]
-    if yes_count(answers, dep_ids) < 2:
-        answers["Q7"] = st.text_area(q7_text, value=answers.get("Q7", ""))
+if _REASON_ROW is not None:
+    reason_text = str(_REASON_ROW["QuestionText"])
+    REASON_QID = str(_REASON_ROW["QuestionID"])
+    # DependsOn parsing
+    dep_ids = [s.strip() for s in str(_REASON_ROW.get("DependsOn", "")).split(",") if s.strip()]
+    op, threshold = parse_yescount_condition(str(_REASON_ROW.get("Show Condition", "")))
+
+    # Evaluate condition against current answers
+    # Show textarea if condition evaluates True (matching your "yes_count<3" style)
+    show_reason = eval_yescount_condition(yes_count(answers, dep_ids), op, threshold)
+
+    if show_reason:
+        answers[REASON_QID] = st.text_area(reason_text, value=answers.get(REASON_QID, ""))
     else:
-        answers["Q7"] = answers.get("Q7", "")
+        # preserve prior text but don't render the input
+        answers[REASON_QID] = answers.get(REASON_QID, "")
 
 # Review
 st.subheader("Review")
@@ -475,9 +451,15 @@ if submitted:
         errors["Q1"] = "Please select a director."
     if not answers.get("Q2"):
         errors["Q2"] = "Please select your name."
-    if not q7_row.empty and yes_count(answers, dep_ids) < 2:
-        if not answers.get("Q7") or len(answers["Q7"].strip()) < 5:
-            errors["Q7"] = "Please provide a brief reason (at least 5 characters)."
+
+    # Validate Reason only if we have a reason row and the condition requires it
+    if _REASON_ROW is not None:
+        op, threshold = parse_yescount_condition(str(_REASON_ROW.get("Show Condition", "")))
+        dep_ids = [s.strip() for s in str(_REASON_ROW.get("DependsOn", "")).split(",") if s.strip()]
+        need_reason = eval_yescount_condition(yes_count(answers, dep_ids), op, threshold)
+        if need_reason:
+            if not answers.get(REASON_QID) or len(str(answers[REASON_QID]).strip()) < 5:
+                errors[REASON_QID] = "Please provide a brief reason (at least 5 characters)."
 
     if errors:
         for v in errors.values():
@@ -489,8 +471,15 @@ if submitted:
             "timestamp": now,
             "Director": answers.get("Q1") or "",
             "Serving Girl": answers.get("Q2") or "",
-            "Reason": (answers.get("Q7") or "").strip(),
         }
+        # Reason column name: prefer Report Label 'Reason', else literal 'Reason'
+        reason_col_name = "Reason"
+        if _REASON_ROW is not None:
+            rr_label = str(_REASON_ROW.get(REPORT_LABEL_COL or "Report Label", "")).strip()
+            if rr_label:
+                reason_col_name = rr_label
+        row_map[reason_col_name] = str(answers.get(REASON_QID, "")).strip() if _REASON_ROW is not None else ""
+
         for _, r in availability_questions.iterrows():
             qid = str(r["QuestionID"])
             label = get_report_label(r)
@@ -499,14 +488,14 @@ if submitted:
         try:
             if SHEETS_MODE:
                 ws = get_worksheet()
-                desired_header = ["timestamp", "Director", "Serving Girl", "Reason"] + labels
+                desired_header = ["timestamp", "Director", "Serving Girl", reason_col_name] + labels
                 header = init_sheet_headers(desired_header)
                 row = [row_map.get(col, "") for col in header]
                 gs_retry(ws.append_row, row)
                 clear_responses_cache()
                 st.success("Submission saved to Google Sheets.")
             else:
-                desired_header = ["timestamp", "Director", "Serving Girl", "Reason"] + labels
+                desired_header = ["timestamp", "Director", "Serving Girl", reason_col_name] + labels
                 header = ensure_local_headers(desired_header)
                 append_row_local(header, row_map)
                 clear_responses_cache()
@@ -515,6 +504,23 @@ if submitted:
             st.error(f"Failed to save submission: {e}")
 
         # Text report for screenshot / sharing
+        def build_human_report(form_questions: pd.DataFrame, answers: dict) -> str:
+            director = answers.get("Q1") or "—"
+            name = answers.get("Q2") or "—"
+            lines = [f"Director: {director}", f"Serving Girl: {name}", "Availability:"]
+            rows = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"]
+            for _, r in rows.iterrows():
+                qid = str(r["QuestionID"])
+                label = get_report_label(r)
+                val = (answers.get(qid) or "No").title()
+                lines.append(f"{label}: {val}")
+            # Reason (dynamic)
+            if _REASON_ROW is not None:
+                reason_text_val = (answers.get(REASON_QID) or "").strip()
+                if reason_text_val:
+                    lines.append(f"{reason_col_name}: {reason_text_val}")
+            return "\n".join(lines)
+
         report_text = build_human_report(form_questions, answers)
         st.markdown("### 📄 Screenshot-friendly report (text)")
         st.code(report_text, language=None)
@@ -554,12 +560,54 @@ with st.expander("Admin"):
 
         if not responses_df.empty:
             st.dataframe(responses_df, use_container_width=True)
+            # export
+            def make_download_payload(df: pd.DataFrame):
+                try:
+                    import openpyxl  # noqa
+                    out = BytesIO()
+                    with pd.ExcelWriter(out, engine="openpyxl") as xw:
+                        df.to_excel(xw, index=False, sheet_name="Responses")
+                    return out.getvalue(), "uKids_availability_responses.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                except Exception:
+                    csv_bytes = df.to_csv(index=False).encode("utf-8")
+                    return csv_bytes, "uKids_availability_responses.csv", "text/csv"
+
             bytes_data, fname, mime = make_download_payload(responses_df)
             st.download_button("Download all responses", data=bytes_data, file_name=fname, mime=mime)
         else:
             st.warning("No submissions yet.")
 
         st.markdown("### ❌ Non-responders")
+        def compute_nonresponders(serving_base_df: pd.DataFrame, responses_df: pd.DataFrame) -> pd.DataFrame:
+            if serving_base_df is None or serving_base_df.empty:
+                return pd.DataFrame(columns=["Director", "Serving Girl"])
+            sb = serving_base_df[["Director", "Serving Girl"]].copy()
+            sb["Director"] = sb["Director"].astype(str).str.strip()
+            sb["Serving Girl"] = sb["Serving Girl"].astype(str).str.strip()
+            sb = sb[(sb["Director"] != "") & (sb["Serving Girl"] != "")].drop_duplicates()
+
+            if responses_df is None or responses_df.empty:
+                out = sb.copy()
+                out["Responded"] = False
+                out["Last submission"] = ""
+                return out
+
+            cols = list(responses_df.columns)
+            ts_col = "timestamp" if "timestamp" in cols else (cols[0] if cols else "timestamp")
+            use_cols = [c for c in cols if c in ["Director", "Serving Girl"] or c == ts_col]
+            resp = responses_df[use_cols].copy()
+            if ts_col not in resp.columns:
+                resp[ts_col] = ""
+            resp.rename(columns={ts_col: "Last submission"}, inplace=True)
+            resp["Director"] = resp["Director"].astype(str).str.strip()
+            resp["Serving Girl"] = resp["Serving Girl"].astype(str).str.strip()
+            resp = resp.sort_values("Last submission").drop_duplicates(subset=["Director", "Serving Girl"], keep="last")
+
+            merged = sb.merge(resp, on=["Director", "Serving Girl"], how="left")
+            merged["Responded"] = merged["Last submission"].notna() & (merged["Last submission"] != "")
+            nonresp = merged[~merged["Responded"]].copy()
+            return nonresp.sort_values(["Director", "Serving Girl"]).reset_index(drop=True)
+
         nonresp_df = compute_nonresponders(serving_base, responses_df)
         all_directors = ["All"] + sorted(serving_base["Director"].dropna().astype(str).str.strip().unique().tolist())
         sel_dir = st.selectbox("Filter by director", options=all_directors, index=0)
@@ -567,8 +615,19 @@ with st.expander("Admin"):
         total_expected = len(serving_base[["Director", "Serving Girl"]].dropna().drop_duplicates())
         st.write(f"Non-responders shown: **{len(view_df)}**  |  Total expected pairs: **{total_expected}**")
         st.dataframe(view_df[["Director", "Serving Girl"]], use_container_width=True)
-        nr_bytes, nr_name, nr_mime = make_download_payload(view_df[["Director", "Serving Girl"]])
-        st.download_button("Download non-responders", data=nr_bytes, file_name="non_responders.xlsx", mime=nr_mime)
+        # export NR
+        def make_download_payload2(df: pd.DataFrame):
+            try:
+                import openpyxl  # noqa
+                out = BytesIO()
+                with pd.ExcelWriter(out, engine="openpyxl") as xw:
+                    df.to_excel(xw, index=False, sheet_name="NonResponders")
+                return out.getvalue(), "non_responders.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            except Exception:
+                csv_bytes = df.to_csv(index=False).encode("utf-8")
+                return csv_bytes, "non_responders.csv", "text/csv"
+        nr_bytes, nr_name, nr_mime = make_download_payload2(view_df[["Director", "Serving Girl"]])
+        st.download_button("Download non-responders", data=nr_bytes, file_name=nr_name, mime=nr_mime)
 
         st.divider()
         st.markdown("#### 🔍 Secrets / Sheets check")

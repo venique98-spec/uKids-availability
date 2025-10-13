@@ -6,7 +6,8 @@ Q4,Are you available 9 November?,9 November,radio,yes_no,None,None
 Q5,Are you available 16 November?,16 November,radio,yes_no,None,None
 Q6,Are you available 23 November?,23 November,radio,yes_no,None,None
 Q7,Are you available 30 November?,30 November,radio,yes_no,None,None
-Q8,Please provide a valid reason why you cannot serve three times this month:,Reason,text,None,"Q3,Q4,Q5,Q6,Q7",yes_count<3
+Q8,Please provide a valid reason why you cannot serve three times this month:,Reason,text,None,"Q3,Q4,Q5,Q6,Q7",yes_count<=2
+
 
 
 

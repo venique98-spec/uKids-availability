@@ -13,14 +13,14 @@ import streamlit as st
 try:
     import gspread
     from gspread.exceptions import APIError, WorksheetNotFound
-except Exception:  # pragma: no cover
+except Exception:  # still run in local mode if not installed
     gspread = None
     class APIError(Exception): ...
     class WorksheetNotFound(Exception): ...
 
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 # UI CONFIG + mobile tweaks
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Availability Form", page_icon="🗓️", layout="centered")
 st.title("🗓️ Availability Form")
 
@@ -39,18 +39,18 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 # File paths
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 FQ_PATH = DATA_DIR / "Form questions.csv"
 SB_PATH = DATA_DIR / "Serving base with allocated directors.csv"
 LOCAL_RESP_PATH = DATA_DIR / "responses_local.csv"
 
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 # Secrets helpers
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 def _get_secret_any(*paths):
     """Try multiple secret paths, return the first value found."""
     try:
@@ -83,9 +83,9 @@ def is_sheets_enabled() -> bool:
 
 SHEETS_MODE = is_sheets_enabled()
 
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 # CSV loading
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [str(c).replace("\u00A0", " ").replace("\u200B", "").strip() for c in df.columns]
     return df
@@ -139,9 +139,9 @@ def load_data():
     )
     return fq, sb, serving_map
 
-# -----------------------------------------------------------------------------
-# Report label helpers
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# Labels + report helpers
+# ──────────────────────────────────────────────────────────────────────────────
 def _norm(s: str) -> str:
     return str(s).replace("\u00A0", " ").replace("\u200B", "").strip().lower()
 
@@ -189,14 +189,17 @@ def build_human_report(form_questions: pd.DataFrame, answers: dict, report_label
         label = get_report_label(r, report_label_col)
         val = (answers.get(qid) or "No").title()
         lines.append(f"{label}: {val}")
-    reason = (answers.get("Q7") or "").strip()
-    if reason:
-        lines.append(f"Reason: {reason}")
+    reason_row = form_questions[(form_questions["QuestionType"].str.lower() == "text")]
+    if not reason_row.empty:
+        rid = str(reason_row.iloc[0]["QuestionID"])
+        reason = (answers.get(rid) or "").strip()
+        if reason:
+            lines.append(f"Reason: {reason}")
     return "\n".join(lines)
 
-# -----------------------------------------------------------------------------
-# Google Sheets helpers (only used if SHEETS_MODE True)
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# Google Sheets helpers
+# ──────────────────────────────────────────────────────────────────────────────
 def gs_retry(func, *args, **kwargs):
     for attempt in range(5):
         try:
@@ -251,9 +254,9 @@ def fetch_responses_df_sheets() -> pd.DataFrame:
     ws = get_worksheet()
     return sheet_get_df(ws)
 
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 # Local CSV fallback
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 def ensure_local_headers(desired_header: list[str]) -> list[str]:
     if not LOCAL_RESP_PATH.exists():
         pd.DataFrame(columns=desired_header).to_csv(LOCAL_RESP_PATH, index=False)
@@ -300,9 +303,9 @@ def clear_responses_cache():
     except Exception:
         pass
 
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 # Non-responders
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 def compute_nonresponders(serving_base_df: pd.DataFrame, responses_df: pd.DataFrame) -> pd.DataFrame:
     if serving_base_df is None or serving_base_df.empty:
         return pd.DataFrame(columns=["Director", "Serving Girl"])
@@ -333,9 +336,9 @@ def compute_nonresponders(serving_base_df: pd.DataFrame, responses_df: pd.DataFr
     nonresp = merged[~merged["Responded"]].copy()
     return nonresp.sort_values(["Director", "Serving Girl"]).reset_index(drop=True)
 
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 # Load input data
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 try:
     form_questions, serving_base, serving_map = load_data()
 except Exception as e:
@@ -352,16 +355,16 @@ REPORT_LABEL_COL = pick_report_label_col(form_questions)
 if not REPORT_LABEL_COL:
     st.warning("No 'Report Label' column found (exact match not detected). Using auto-detected labels.")
 
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 # UI state
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 if "answers" not in st.session_state:
     st.session_state.answers = {}
 answers = st.session_state.answers
 
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 # Form UI
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 st.subheader("Your details")
 
 directors = sorted([d for d in serving_map.keys() if d])
@@ -374,37 +377,55 @@ else:
     answers["Q2"] = ""
 
 st.subheader("Availability in December")
-availability_questions = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"].copy()
 
-# FIX: prevent phantom empty radio option (use index=None unless we have a saved value)
+# All yes/no radios (e.g., Q3–Q7)
+availability_questions = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"].copy()
 radio_options = ["Yes", "No"]
 for _, q in availability_questions.iterrows():
     qid = str(q["QuestionID"])
     qtext = str(q["QuestionText"])
 
     saved = answers.get(qid)
-    idx = radio_options.index(saved) if saved in radio_options else None
-
+    idx = radio_options.index(saved) if saved in radio_options else None  # no default
     choice = st.radio(
         qtext,
         options=radio_options,
-        index=idx,               # <-- critical fix: don't force a default
-        key=f"avail_{qid}",      # unique key per question
+        index=idx,
+        key=f"avail_{qid}",
         horizontal=False
     )
     answers[qid] = choice
 
-# Conditional Q7
-q7_row = form_questions[form_questions["QuestionID"].astype(str) == "Q7"]
-dep_ids = []
-if not q7_row.empty:
-    q7 = q7_row.iloc[0]
-    q7_text = str(q7["QuestionText"])
-    dep_ids = [s.strip() for s in str(q7["DependsOn"]).split(",") if s.strip()]
-    if yes_count(answers, dep_ids) < 2:
-        answers["Q7"] = st.text_area(q7_text, value=answers.get("Q7", ""))
+# Find the Reason (text) row dynamically (Q8 in your CSV)
+reason_row_df = form_questions[form_questions["QuestionType"].astype(str).str.lower() == "text"]
+reason_qid = None
+reason_dep_ids = []
+reason_threshold = None
+
+if not reason_row_df.empty:
+    rr = reason_row_df.iloc[0]
+    reason_qid = str(rr["QuestionID"])
+    # Parse DependsOn, e.g., Q3,Q4,Q5,Q6,Q7
+    if pd.notna(rr["DependsOn"]) and str(rr["DependsOn"]).strip().lower() != "none":
+        reason_dep_ids = [s.strip() for s in str(rr["DependsOn"]).split(",") if s.strip()]
+    # Parse Show Condition like "yes_count<2"
+    cond = str(rr["Show Condition"]).strip()
+    m = re.match(r"yes_count\s*<\s*(\d+)", cond, flags=re.I)
+    if m:
+        reason_threshold = int(m.group(1))
+
+# Render reason box only if condition met
+if reason_qid:
+    show_reason = True
+    if reason_threshold is not None and reason_dep_ids:
+        show_reason = yes_count(answers, reason_dep_ids) < reason_threshold
+    if show_reason:
+        answers[reason_qid] = st.text_area(
+            str(reason_row_df.iloc[0]["QuestionText"]),
+            value=answers.get(reason_qid, "")
+        )
     else:
-        answers["Q7"] = answers.get("Q7", "")
+        answers[reason_qid] = answers.get(reason_qid, "")
 
 # Review
 st.subheader("Review")
@@ -414,9 +435,9 @@ with c1: st.metric("Director", answers.get("Q1") or "—")
 with c2: st.metric("Name", answers.get("Q2") or "—")
 with c3: st.metric("Yes count", yes_count(answers, yes_ids))
 
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 # Submit (sticky)
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 errors = {}
 st.markdown('<div class="sticky-submit">', unsafe_allow_html=True)
 submitted = st.button("Submit")
@@ -427,9 +448,11 @@ if submitted:
         errors["Q1"] = "Please select a director."
     if not answers.get("Q2"):
         errors["Q2"] = "Please select your name."
-    if not q7_row.empty and yes_count(answers, dep_ids) < 2:
-        if not answers.get("Q7") or len(answers["Q7"].strip()) < 5:
-            errors["Q7"] = "Please provide a brief reason (at least 5 characters)."
+    # If reason is required by condition, enforce it
+    if reason_qid and reason_threshold is not None and reason_dep_ids:
+        if yes_count(answers, reason_dep_ids) < reason_threshold:
+            if not answers.get(reason_qid) or len(answers[reason_qid].strip()) < 5:
+                errors[reason_qid] = "Please provide a brief reason (at least 5 characters)."
 
     if errors:
         for msg in errors.values():
@@ -441,7 +464,7 @@ if submitted:
             "timestamp": now,
             "Director": answers.get("Q1") or "",
             "Serving Girl": answers.get("Q2") or "",
-            "Reason": (answers.get("Q7") or "").strip(),
+            "Reason": (answers.get(reason_qid) or "").strip() if reason_qid else "",
         }
         for _, r in availability_questions.iterrows():
             qid = str(r["QuestionID"])
@@ -477,9 +500,9 @@ if submitted:
             mime="text/plain",
         )
 
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 # Admin: exports + non-responders + diagnostics
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 with st.expander("Admin"):
     st.caption(f"Mode: {'Google Sheets' if SHEETS_MODE else 'Local CSV'}")
     if not ADMIN_KEY:

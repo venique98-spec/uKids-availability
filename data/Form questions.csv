@@ -4,9 +4,10 @@ Q2,Please select your name,Serving Girl,dropdown,serving_girls,Q1,director={{ans
 Q3,Are you available 7 December?,7 December,radio,yes_no,None,None
 Q4,Are you available 14 December?,14 December,radio,yes_no,None,None
 Q5,Are you available 21 December?,21 December,radio,yes_no,None,None
-Q6,Are you available on Christmas morning, 25 December?,25 December,radio,yes_no,None,None
+Q6,Are you available on Christmas morning - 25 December?,25 December,radio,yes_no,None,None
 Q7,Are you available 28 December?,28 December,radio,yes_no,None,None
 Q8,Please provide a valid reason why you cannot serve three times this month:,Reason,text,None,"Q3,Q4,Q5,Q6,Q7",yes_count<=2
+
 
 
 

@@ -176,7 +176,7 @@ def yesno_labels(form_questions: pd.DataFrame, report_label_col: str | None) -> 
             labels.append(lbl)
     return labels
 
-def yes_count(answers: dict, ids):
+def yes_count(answers: dict, ids) -> int:
     return sum(1 for qid in ids if str(answers.get(qid, "")).lower() == "yes")
 
 def build_human_report(form_questions: pd.DataFrame, answers: dict, report_label_col: str | None) -> str:
@@ -376,7 +376,7 @@ if answers.get("Q1"):
 else:
     answers["Q2"] = ""
 
-st.subheader("Availability in December")
+st.subheader("Availability")
 
 # All yes/no radios (e.g., Q3–Q7)
 availability_questions = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"].copy()
@@ -400,7 +400,6 @@ for _, q in availability_questions.iterrows():
 reason_row_df = form_questions[form_questions["QuestionType"].astype(str).str.lower() == "text"]
 reason_qid = None
 reason_dep_ids = []
-reason_threshold = None
 
 if not reason_row_df.empty:
     rr = reason_row_df.iloc[0]
@@ -408,17 +407,15 @@ if not reason_row_df.empty:
     # Parse DependsOn, e.g., Q3,Q4,Q5,Q6,Q7
     if pd.notna(rr["DependsOn"]) and str(rr["DependsOn"]).strip().lower() != "none":
         reason_dep_ids = [s.strip() for s in str(rr["DependsOn"]).split(",") if s.strip()]
-    # Parse Show Condition like "yes_count<2"
-    cond = str(rr["Show Condition"]).strip()
-    m = re.match(r"yes_count\s*<\s*(\d+)", cond, flags=re.I)
-    if m:
-        reason_threshold = int(m.group(1))
 
-# Render reason box only if condition met
+# *** NEW RULE: hide the reason box when there are 3 or more "Yes" answers ***
+REASON_YES_THRESHOLD = 3  # <<— change this number if you ever want a different cutoff
+
+# Render reason box only if count of Yes among its DependsOn is below threshold
 if reason_qid:
     show_reason = True
-    if reason_threshold is not None and reason_dep_ids:
-        show_reason = yes_count(answers, reason_dep_ids) < reason_threshold
+    if reason_dep_ids:
+        show_reason = yes_count(answers, reason_dep_ids) < REASON_YES_THRESHOLD
     if show_reason:
         answers[reason_qid] = st.text_area(
             str(reason_row_df.iloc[0]["QuestionText"]),
@@ -448,11 +445,10 @@ if submitted:
         errors["Q1"] = "Please select a director."
     if not answers.get("Q2"):
         errors["Q2"] = "Please select your name."
-    # If reason is required by condition, enforce it
-    if reason_qid and reason_threshold is not None and reason_dep_ids:
-        if yes_count(answers, reason_dep_ids) < reason_threshold:
-            if not answers.get(reason_qid) or len(answers[reason_qid].strip()) < 5:
-                errors[reason_qid] = "Please provide a brief reason (at least 5 characters)."
+    # If the reason box is being shown (i.e., < threshold), enforce a short reason
+    if reason_qid and reason_dep_ids and (yes_count(answers, reason_dep_ids) < REASON_YES_THRESHOLD):
+        if not answers.get(reason_qid) or len(answers[reason_qid].strip()) < 5:
+            errors[reason_qid] = "Please provide a brief reason (at least 5 characters)."
 
     if errors:
         for msg in errors.values():

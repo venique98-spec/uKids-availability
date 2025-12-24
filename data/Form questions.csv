@@ -5,7 +5,8 @@ Q3,Are you available 4 January?,4 January,radio,yes_no,None,None
 Q4,Are you available 11 January?,11 January,radio,yes_no,None,None
 Q5,Are you available 18 January?,18 January,radio,yes_no,None,None
 Q6,Are you available 25 January?,25 January,radio,yes_no,None,None
-Q7,Please provide a valid reason why you cannot serve three times this month:,Reason,text,None,"Q3,Q4,Q5,Q6",yes_count<=2
+Q7,Please provide a valid reason why you cannot serve three times this month:,Reason,text,None,"Q3,Q4,Q5,Q6",yes_count<=1
+
 
 
 

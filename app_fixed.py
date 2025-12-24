@@ -15,8 +15,13 @@ try:
     from gspread.exceptions import APIError, WorksheetNotFound
 except Exception:  # still run in local mode if not installed
     gspread = None
-    class APIError(Exception): ...
-    class WorksheetNotFound(Exception): ...
+
+    class APIError(Exception):
+        ...
+
+    class WorksheetNotFound(Exception):
+        ...
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # UI CONFIG + mobile tweaks
@@ -24,7 +29,8 @@ except Exception:  # still run in local mode if not installed
 st.set_page_config(page_title="Availability Form", page_icon="🗓️", layout="centered")
 st.title("🗓️ Availability Form")
 
-st.markdown("""
+st.markdown(
+    """
 <style>
   .stButton > button { width: 100%; height: 48px; font-size: 16px; }
   label[data-baseweb="radio"] { padding: 6px 0; }
@@ -37,7 +43,9 @@ st.markdown("""
     background: #fff; padding: 10px 0; border-top: 1px solid #eee;
   }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # File paths
@@ -58,28 +66,36 @@ def _get_secret_any(*paths):
     except Exception:
         return None
     for path in paths:
-        c = cur; ok = True
+        c = cur
+        ok = True
         for k in path:
             if k in c:
                 c = c[k]
             else:
-                ok = False; break
+                ok = False
+                break
         if ok:
             return c
     return None
+
 
 def get_admin_key() -> str:
     v = _get_secret_any(["ADMIN_KEY"], ["general", "ADMIN_KEY"])
     return str(v) if v else ""
 
+
 ADMIN_KEY = get_admin_key()
+
 
 def is_sheets_enabled() -> bool:
     if gspread is None:
         return False
     sa = _get_secret_any(["gcp_service_account"], ["general", "gcp_service_account"])
-    sid = _get_secret_any(["GSHEET_ID"], ["general", "GSHEET_ID"], ["gcp_service_account", "GSHEET_ID"])
+    sid = _get_secret_any(
+        ["GSHEET_ID"], ["general", "GSHEET_ID"], ["gcp_service_account", "GSHEET_ID"]
+    )
     return bool(sa and sid)
+
 
 SHEETS_MODE = is_sheets_enabled()
 
@@ -87,8 +103,11 @@ SHEETS_MODE = is_sheets_enabled()
 # CSV loading
 # ──────────────────────────────────────────────────────────────────────────────
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df.columns = [str(c).replace("\u00A0", " ").replace("\u200B", "").strip() for c in df.columns]
+    df.columns = [
+        str(c).replace("\u00A0", " ").replace("\u200B", "").strip() for c in df.columns
+    ]
     return df
+
 
 def _read_csv_any(path: Path) -> pd.DataFrame:
     if not path.exists():
@@ -102,20 +121,32 @@ def _read_csv_any(path: Path) -> pd.DataFrame:
     delimiter = ";" if sample.count(";") > sample.count(",") else ","
     return pd.read_csv(path, encoding="latin1", sep=delimiter, engine="python")
 
+
 @st.cache_data(show_spinner=False)
 def load_data():
     fq = _normalize_columns(_read_csv_any(FQ_PATH))
     sb = _normalize_columns(_read_csv_any(SB_PATH))
 
-    needed_fq = {"QuestionID", "QuestionText", "QuestionType", "Options Source", "DependsOn", "Show Condition"}
+    needed_fq = {
+        "QuestionID",
+        "QuestionText",
+        "QuestionType",
+        "Options Source",
+        "DependsOn",
+        "Show Condition",
+    }
     miss_fq = needed_fq - set(fq.columns)
     if miss_fq:
-        raise RuntimeError(f"`Form questions.csv` missing columns: {', '.join(sorted(miss_fq))}")
+        raise RuntimeError(
+            f"`Form questions.csv` missing columns: {', '.join(sorted(miss_fq))}"
+        )
 
     needed_sb = {"Director", "Serving Girl"}
     miss_sb = needed_sb - set(sb.columns)
     if miss_sb:
-        raise RuntimeError(f"`Serving base with allocated directors.csv` missing columns: {', '.join(sorted(miss_sb))}")
+        raise RuntimeError(
+            f"`Serving base with allocated directors.csv` missing columns: {', '.join(sorted(miss_sb))}"
+        )
 
     fq = fq.assign(
         QuestionID=fq["QuestionID"].astype(str).str.strip(),
@@ -125,25 +156,25 @@ def load_data():
             "Options Source": fq["Options Source"].astype(str).str.strip(),
             "DependsOn": fq["DependsOn"].astype(str).str.strip(),
             "Show Condition": fq["Show Condition"].astype(str).str.strip(),
-        }
+        },
     )
     sb = sb.assign(
         Director=sb["Director"].astype(str).str.strip(),
-        **{"Serving Girl": sb["Serving Girl"].astype(str).str.strip()}
+        **{"Serving Girl": sb["Serving Girl"].astype(str).str.strip()},
     )
 
     serving_map = (
-        sb.groupby("Director")["Serving Girl"]
-        .apply(lambda s: sorted({x for x in s if x}))
-        .to_dict()
+        sb.groupby("Director")["Serving Girl"].apply(lambda s: sorted({x for x in s if x})).to_dict()
     )
     return fq, sb, serving_map
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Labels + report helpers
 # ──────────────────────────────────────────────────────────────────────────────
 def _norm(s: str) -> str:
     return str(s).replace("\u00A0", " ").replace("\u200B", "").strip().lower()
+
 
 def pick_report_label_col(df: pd.DataFrame):
     candidates = ["report label", "reportlabel", "label"]
@@ -153,19 +184,26 @@ def pick_report_label_col(df: pd.DataFrame):
             return cmap[cand]
     return None
 
+
 def extract_date_from_label(label: str) -> str:
-    m = re.search(r'(\d{1,2})(?:st|nd|rd|th)?\s+of\s+(October|November|December|Sept|September|Oct|Nov|Dec)', label, flags=re.I)
+    m = re.search(
+        r"(\d{1,2})(?:st|nd|rd|th)?\s+of\s+(October|November|December|Sept|September|Oct|Nov|Dec)",
+        label,
+        flags=re.I,
+    )
     if m:
         return f"{m.group(1)} {m.group(2).title().replace('Sept','September').replace('Oct','October').replace('Nov','November').replace('Dec','December')}"
-    m2 = re.search(r'(\d{1,2})\s+(October|November|December)', label, flags=re.I)
+    m2 = re.search(r"(\d{1,2})\s+(October|November|December)", label, flags=re.I)
     if m2:
         return f"{m2.group(1)} {m2.group(2).title()}"
     return label.strip()
+
 
 def get_report_label(row, report_label_col: str | None) -> str:
     if report_label_col and report_label_col in row and str(row[report_label_col]).strip():
         return str(row[report_label_col]).strip()
     return extract_date_from_label(str(row.get("QuestionText", "")).strip())
+
 
 def yesno_labels(form_questions: pd.DataFrame, report_label_col: str | None) -> list[str]:
     labels = []
@@ -176,8 +214,10 @@ def yesno_labels(form_questions: pd.DataFrame, report_label_col: str | None) -> 
             labels.append(lbl)
     return labels
 
+
 def yes_count(answers: dict, ids) -> int:
     return sum(1 for qid in ids if str(answers.get(qid, "")).lower() == "yes")
+
 
 def build_human_report(form_questions: pd.DataFrame, answers: dict, report_label_col: str | None) -> str:
     director = answers.get("Q1") or "—"
@@ -197,6 +237,7 @@ def build_human_report(form_questions: pd.DataFrame, answers: dict, report_label
             lines.append(f"Reason: {reason}")
     return "\n".join(lines)
 
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Google Sheets helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -207,9 +248,10 @@ def gs_retry(func, *args, **kwargs):
         except APIError as e:
             status = getattr(getattr(e, "response", None), "status_code", None)
             if status in (429, 500, 502, 503):
-                time.sleep(min(10, (2 ** attempt) + random.random()))
+                time.sleep(min(10, (2**attempt) + random.random()))
                 continue
             raise
+
 
 @st.cache_resource
 def get_worksheet():
@@ -229,6 +271,7 @@ def get_worksheet():
         ws = sh.add_worksheet(title="Responses", rows=1, cols=50)
     return ws
 
+
 @st.cache_resource
 def init_sheet_headers(desired_header: list[str]) -> list[str]:
     ws = get_worksheet()
@@ -242,6 +285,7 @@ def init_sheet_headers(desired_header: list[str]) -> list[str]:
         gs_retry(ws.update, "1:1", [header])
     return header
 
+
 def sheet_get_df(ws) -> pd.DataFrame:
     values = gs_retry(ws.get_all_values)
     if not values:
@@ -249,10 +293,12 @@ def sheet_get_df(ws) -> pd.DataFrame:
     header, rows = values[0], values[1:]
     return pd.DataFrame(rows, columns=header)
 
+
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_responses_df_sheets() -> pd.DataFrame:
     ws = get_worksheet()
     return sheet_get_df(ws)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Local CSV fallback
@@ -274,6 +320,7 @@ def ensure_local_headers(desired_header: list[str]) -> list[str]:
         return desired_header
     return list(df.columns)
 
+
 def append_row_local(header: list[str], row_map: dict):
     row = {k: row_map.get(k, "") for k in header}
     try:
@@ -283,6 +330,7 @@ def append_row_local(header: list[str], row_map: dict):
     df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     df.to_csv(LOCAL_RESP_PATH, index=False)
 
+
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_responses_df_local() -> pd.DataFrame:
     if not LOCAL_RESP_PATH.exists():
@@ -291,6 +339,7 @@ def fetch_responses_df_local() -> pd.DataFrame:
         return pd.read_csv(LOCAL_RESP_PATH)
     except Exception:
         return pd.DataFrame()
+
 
 def clear_responses_cache():
     for fn in (fetch_responses_df_sheets, fetch_responses_df_local):
@@ -302,6 +351,7 @@ def clear_responses_cache():
         st.cache_data.clear()
     except Exception:
         pass
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Non-responders
@@ -329,12 +379,15 @@ def compute_nonresponders(serving_base_df: pd.DataFrame, responses_df: pd.DataFr
     resp.rename(columns={ts_col: "Last submission"}, inplace=True)
     resp["Director"] = resp["Director"].astype(str).str.strip()
     resp["Serving Girl"] = resp["Serving Girl"].astype(str).str.strip()
-    resp = resp.sort_values("Last submission").drop_duplicates(subset=["Director", "Serving Girl"], keep="last")
+    resp = resp.sort_values("Last submission").drop_duplicates(
+        subset=["Director", "Serving Girl"], keep="last"
+    )
 
     merged = sb.merge(resp, on=["Director", "Serving Girl"], how="left")
     merged["Responded"] = merged["Last submission"].notna() & (merged["Last submission"] != "")
     nonresp = merged[~merged["Responded"]].copy()
     return nonresp.sort_values(["Director", "Serving Girl"]).reset_index(drop=True)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Load input data
@@ -344,7 +397,8 @@ try:
 except Exception as e:
     st.error(f"Data load error: {e}")
     with st.expander("Debug info"):
-        st.code(str(FQ_PATH)); st.code(str(SB_PATH))
+        st.code(str(FQ_PATH))
+        st.code(str(SB_PATH))
         try:
             st.write("Directory listing of ./data:", [p.name for p in DATA_DIR.iterdir()])
         except Exception:
@@ -392,7 +446,7 @@ for _, q in availability_questions.iterrows():
         options=radio_options,
         index=idx,
         key=f"avail_{qid}",
-        horizontal=False
+        horizontal=False,
     )
     answers[qid] = choice
 
@@ -408,8 +462,8 @@ if not reason_row_df.empty:
     if pd.notna(rr["DependsOn"]) and str(rr["DependsOn"]).strip().lower() != "none":
         reason_dep_ids = [s.strip() for s in str(rr["DependsOn"]).split(",") if s.strip()]
 
-# *** NEW RULE: hide the reason box when there are 3 or more "Yes" answers ***
-REASON_YES_THRESHOLD = 3  # <<— change this number if you ever want a different cutoff
+# *** UPDATED RULE: hide the reason box when there are 2 or more "Yes" answers ***
+REASON_YES_THRESHOLD = 2  # <<— changed from 3 to 2
 
 # Render reason box only if count of Yes among its DependsOn is below threshold
 if reason_qid:
@@ -419,7 +473,7 @@ if reason_qid:
     if show_reason:
         answers[reason_qid] = st.text_area(
             str(reason_row_df.iloc[0]["QuestionText"]),
-            value=answers.get(reason_qid, "")
+            value=answers.get(reason_qid, ""),
         )
     else:
         answers[reason_qid] = answers.get(reason_qid, "")
@@ -428,9 +482,12 @@ if reason_qid:
 st.subheader("Review")
 yes_ids = form_questions[form_questions["Options Source"].str.lower() == "yes_no"]["QuestionID"].astype(str).tolist()
 c1, c2, c3 = st.columns(3)
-with c1: st.metric("Director", answers.get("Q1") or "—")
-with c2: st.metric("Name", answers.get("Q2") or "—")
-with c3: st.metric("Yes count", yes_count(answers, yes_ids))
+with c1:
+    st.metric("Director", answers.get("Q1") or "—")
+with c2:
+    st.metric("Name", answers.get("Q2") or "—")
+with c3:
+    st.metric("Yes count", yes_count(answers, yes_ids))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Submit (sticky)
@@ -438,7 +495,7 @@ with c3: st.metric("Yes count", yes_count(answers, yes_ids))
 errors = {}
 st.markdown('<div class="sticky-submit">', unsafe_allow_html=True)
 submitted = st.button("Submit")
-st.markdown('</div>', unsafe_allow_html=True)
+st.markdown("</div>", unsafe_allow_html=True)
 
 if submitted:
     if not answers.get("Q1"):
@@ -525,24 +582,33 @@ with st.expander("Admin"):
                 out = BytesIO()
                 with pd.ExcelWriter(out, engine="openpyxl") as xw:
                     responses_df.to_excel(xw, index=False, sheet_name="Responses")
-                st.download_button("Download all responses", data=out.getvalue(),
-                                   file_name="uKids_availability_responses.xlsx",
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                st.download_button(
+                    "Download all responses",
+                    data=out.getvalue(),
+                    file_name="uKids_availability_responses.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
             except Exception:
-                st.download_button("Download all responses",
-                                   data=responses_df.to_csv(index=False).encode("utf-8"),
-                                   file_name="uKids_availability_responses.csv",
-                                   mime="text/csv")
+                st.download_button(
+                    "Download all responses",
+                    data=responses_df.to_csv(index=False).encode("utf-8"),
+                    file_name="uKids_availability_responses.csv",
+                    mime="text/csv",
+                )
         else:
             st.warning("No submissions yet.")
 
         st.markdown("### ❌ Non-responders")
         nonresp_df = compute_nonresponders(serving_base, responses_df)
-        all_directors = ["All"] + sorted(serving_base["Director"].dropna().astype(str).str.strip().unique().tolist())
+        all_directors = ["All"] + sorted(
+            serving_base["Director"].dropna().astype(str).str.strip().unique().tolist()
+        )
         sel_dir = st.selectbox("Filter by director", options=all_directors, index=0)
         view_df = nonresp_df if sel_dir == "All" else nonresp_df[nonresp_df["Director"] == sel_dir]
         total_expected = len(serving_base[["Director", "Serving Girl"]].dropna().drop_duplicates())
-        st.write(f"Non-responders shown: **{len(view_df)}**  |  Total expected pairs: **{total_expected}**")
+        st.write(
+            f"Non-responders shown: **{len(view_df)}**  |  Total expected pairs: **{total_expected}**"
+        )
         st.dataframe(view_df[["Director", "Serving Girl"]], use_container_width=True)
 
         st.divider()
@@ -551,14 +617,16 @@ with st.expander("Admin"):
             s = st.secrets
             gsa = s.get("gcp_service_account", {})
             gs_id = s.get("GSHEET_ID") or s.get("general", {}).get("GSHEET_ID") or gsa.get("GSHEET_ID")
-            st.write({
-                "has_gcp_service_account_block": bool(gsa),
-                "GSHEET_ID_present": bool(gs_id),
-                "client_email": gsa.get("client_email", "(missing)"),
-                "private_key_id_present": bool(gsa.get("private_key_id")),
-                "private_key_length": len(gsa.get("private_key", "")),
-                "gspread_installed": gspread is not None,
-            })
+            st.write(
+                {
+                    "has_gcp_service_account_block": bool(gsa),
+                    "GSHEET_ID_present": bool(gs_id),
+                    "client_email": gsa.get("client_email", "(missing)"),
+                    "private_key_id_present": bool(gsa.get("private_key_id")),
+                    "private_key_length": len(gsa.get("private_key", "")),
+                    "gspread_installed": gspread is not None,
+                }
+            )
             if gspread is None:
                 st.warning("gspread not installed. Add 'gspread' and 'google-auth' to requirements.txt and reboot.")
             elif gsa and gs_id:

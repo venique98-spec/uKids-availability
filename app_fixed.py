@@ -205,9 +205,22 @@ def get_report_label(row, report_label_col: str | None) -> str:
     return extract_date_from_label(str(row.get("QuestionText", "")).strip())
 
 
+# ✅✅✅ CHANGED: more robust yes_no detection so Q7 won't get skipped due to formatting
+def is_yes_no_source(series: pd.Series) -> pd.Series:
+    return (
+        series.astype(str)
+        .str.replace("\u00A0", " ", regex=False)
+        .str.replace("\u200B", "", regex=False)
+        .str.strip()
+        .str.lower()
+        .str.contains("yes_no", na=False)
+    )
+
+
 def yesno_labels(form_questions: pd.DataFrame, report_label_col: str | None) -> list[str]:
     labels = []
-    rows = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"]
+    # ✅✅✅ CHANGED: replaced strict == "yes_no" with contains("yes_no")
+    rows = form_questions[is_yes_no_source(form_questions["Options Source"])]
     for _, r in rows.iterrows():
         lbl = get_report_label(r, report_label_col)
         if lbl not in labels:
@@ -223,7 +236,8 @@ def build_human_report(form_questions: pd.DataFrame, answers: dict, report_label
     director = answers.get("Q1") or "—"
     name = answers.get("Q2") or "—"
     lines = [f"Director: {director}", f"Serving Girl: {name}", "Availability:"]
-    rows = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"]
+    # ✅✅✅ CHANGED: replaced strict == "yes_no" with contains("yes_no")
+    rows = form_questions[is_yes_no_source(form_questions["Options Source"])]
     for _, r in rows.iterrows():
         qid = str(r["QuestionID"])
         label = get_report_label(r, report_label_col)
@@ -432,8 +446,9 @@ else:
 
 st.subheader("Availability")
 
-# All yes/no radios (e.g., Q3–Q7)
-availability_questions = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"].copy()
+# ✅✅✅ CHANGED: robust yes_no filter so Q7 will be included even if formatting differs
+availability_questions = form_questions[is_yes_no_source(form_questions["Options Source"])].copy()
+
 radio_options = ["Yes", "No"]
 for _, q in availability_questions.iterrows():
     qid = str(q["QuestionID"])
@@ -480,7 +495,10 @@ if reason_qid:
 
 # Review
 st.subheader("Review")
-yes_ids = form_questions[form_questions["Options Source"].str.lower() == "yes_no"]["QuestionID"].astype(str).tolist()
+
+# ✅✅✅ CHANGED: yes_ids should match the same yes_no filter
+yes_ids = form_questions[is_yes_no_source(form_questions["Options Source"])]["QuestionID"].astype(str).tolist()
+
 c1, c2, c3 = st.columns(3)
 with c1:
     st.metric("Director", answers.get("Q1") or "—")

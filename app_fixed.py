@@ -53,24 +53,26 @@ st.markdown(
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# File paths
+# File paths (CSV fallback)
 # ──────────────────────────────────────────────────────────────────────────────
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
-# Streamlined files
 BASE_Q_PATH = DATA_DIR / "form_base_questions.csv"
 DATES_PATH = DATA_DIR / "service_dates.csv"
-
-# Existing data file
 SB_PATH = DATA_DIR / "Serving base with allocated directors.csv"
-
-# Storage
+DEADLINES_PATH = DATA_DIR / "deadlines.csv"
 LOCAL_RESP_PATH = DATA_DIR / "responses_local.csv"
 
-# Deadline file (availability month key -> deadline in prior month)
-DEADLINES_PATH = DATA_DIR / "deadlines.csv"
-
+# ──────────────────────────────────────────────────────────────────────────────
+# Google Sheets config (Option A: one spreadsheet with 4 tabs)
+# Tabs:
+#   Responses, ServingBase, Deadlines, ServiceDates
+# ──────────────────────────────────────────────────────────────────────────────
+SHEET_TAB_RESPONSES = "Responses"
+SHEET_TAB_SERVING = "ServingBase"
+SHEET_TAB_DEADLINES = "Deadlines"
+SHEET_TAB_DATES = "ServiceDates"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Secrets helpers
@@ -103,21 +105,19 @@ def get_admin_key() -> str:
 ADMIN_KEY = get_admin_key()
 
 
-def is_sheets_enabled() -> bool:
+def is_google_sheet_enabled() -> bool:
+    """One-sheet setup: needs gspread + service account + GSHEET_ID."""
     if gspread is None:
         return False
     sa = _get_secret_any(["gcp_service_account"], ["general", "gcp_service_account"])
-    sid = _get_secret_any(
-        ["GSHEET_ID"], ["general", "GSHEET_ID"], ["gcp_service_account", "GSHEET_ID"]
-    )
+    sid = _get_secret_any(["GSHEET_ID"], ["general", "GSHEET_ID"])
     return bool(sa and sid)
 
 
-SHEETS_MODE = is_sheets_enabled()
-
+SHEETS_MODE = is_google_sheet_enabled()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# CSV loading
+# CSV helpers
 # ──────────────────────────────────────────────────────────────────────────────
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [
@@ -139,154 +139,6 @@ def _read_csv_any(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, encoding="latin1", sep=delimiter, engine="python")
 
 
-@st.cache_data(show_spinner=False)
-def load_base_questions_and_serving():
-    base_q = _normalize_columns(_read_csv_any(BASE_Q_PATH))
-    sb = _normalize_columns(_read_csv_any(SB_PATH))
-
-    needed_bq = {
-        "QuestionID",
-        "QuestionText",
-        "ReportLabel",
-        "QuestionType",
-        "OptionsSource",
-        "DependsOn",
-        "ShowCondition",
-    }
-    miss_bq = needed_bq - set(base_q.columns)
-    if miss_bq:
-        raise RuntimeError(
-            f"`form_base_questions.csv` missing columns: {', '.join(sorted(miss_bq))}"
-        )
-
-    needed_sb = {"Director", "Serving Girl"}
-    miss_sb = needed_sb - set(sb.columns)
-    if miss_sb:
-        raise RuntimeError(
-            f"`Serving base with allocated directors.csv` missing columns: {', '.join(sorted(miss_sb))}"
-        )
-
-    base_q = base_q.assign(
-        QuestionID=base_q["QuestionID"].astype(str).str.strip(),
-        QuestionText=base_q["QuestionText"].astype(str).str.strip(),
-        ReportLabel=base_q["ReportLabel"].astype(str).str.strip(),
-        QuestionType=base_q["QuestionType"].astype(str).str.strip(),
-        OptionsSource=base_q["OptionsSource"].astype(str).str.strip(),
-        DependsOn=base_q["DependsOn"].astype(str).str.strip(),
-        ShowCondition=base_q["ShowCondition"].astype(str).str.strip(),
-    )
-
-    sb = sb.assign(
-        Director=sb["Director"].astype(str).str.strip(),
-        **{"Serving Girl": sb["Serving Girl"].astype(str).str.strip()},
-    )
-
-    serving_map = (
-        sb.groupby("Director")["Serving Girl"]
-        .apply(lambda s: sorted({x for x in s if x}))
-        .to_dict()
-    )
-
-    return base_q, sb, serving_map
-
-
-@st.cache_data(show_spinner=False)
-def load_service_dates() -> pd.DataFrame:
-    df = _normalize_columns(_read_csv_any(DATES_PATH))
-    needed = {"target_month", "date", "label", "is_service_day"}
-    miss = needed - set(df.columns)
-    if miss:
-        raise RuntimeError(f"`service_dates.csv` missing columns: {', '.join(sorted(miss))}")
-
-    df = df.assign(
-        target_month=df["target_month"].astype(str).str.strip(),
-        date=df["date"].astype(str).str.strip(),
-        label=df["label"].astype(str).str.strip(),
-        is_service_day=df["is_service_day"].fillna(0),
-    )
-
-    def _to_int(x):
-        try:
-            return int(float(x))
-        except Exception:
-            return 0
-
-    df["is_service_day"] = df["is_service_day"].map(_to_int)
-    return df
-
-
-@st.cache_data(show_spinner=False)
-def load_deadlines() -> pd.DataFrame:
-    df = _normalize_columns(_read_csv_any(DEADLINES_PATH))
-    needed = {"month", "deadline_local", "timezone"}
-    miss = needed - set(df.columns)
-    if miss:
-        raise RuntimeError(f"`deadlines.csv` missing columns: {', '.join(sorted(miss))}")
-
-    df = df.assign(
-        month=df["month"].astype(str).str.strip(),
-        deadline_local=df["deadline_local"].astype(str).str.strip(),
-        timezone=df["timezone"].astype(str).str.strip(),
-    )
-    return df
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Time helpers
-# ──────────────────────────────────────────────────────────────────────────────
-def get_now_in_tz(tz_name: str) -> datetime:
-    if ZoneInfo is None:
-        return datetime.utcnow()
-    return datetime.now(ZoneInfo(tz_name))
-
-
-def parse_deadline_local(deadline_local: str, tz_name: str) -> datetime:
-    dt_naive = datetime.strptime(deadline_local, "%Y-%m-%d %H:%M")
-    if ZoneInfo is None:
-        return dt_naive
-    return dt_naive.replace(tzinfo=ZoneInfo(tz_name))
-
-
-def add_one_month(dt: datetime) -> datetime:
-    y, m = dt.year, dt.month
-    if m == 12:
-        y2, m2 = y + 1, 1
-    else:
-        y2, m2 = y, m + 1
-    if dt.tzinfo:
-        return datetime(y2, m2, 1, tzinfo=dt.tzinfo)
-    return datetime(y2, m2, 1)
-
-
-def get_target_month_key(now_local: datetime) -> str:
-    """In Feb -> target is Mar, in Mar -> target is Apr, etc."""
-    return add_one_month(now_local).strftime("%Y-%m")
-
-
-def get_deadline_for_target_month(deadlines_df: pd.DataFrame, target_month_key: str):
-    tz_guess = "Africa/Johannesburg"
-    if not deadlines_df.empty and str(deadlines_df["timezone"].iloc[0]).strip():
-        tz_guess = str(deadlines_df["timezone"].iloc[0]).strip()
-
-    match = deadlines_df[deadlines_df["month"] == target_month_key]
-    if match.empty:
-        return None, tz_guess
-
-    row = match.iloc[0]
-    tz_name = str(row["timezone"]).strip() or tz_guess
-    deadline_dt = parse_deadline_local(str(row["deadline_local"]).strip(), tz_name)
-    return deadline_dt, tz_name
-
-
-def format_minutes_remaining(delta_seconds: float) -> str:
-    mins = max(0, int(delta_seconds // 60))
-    hrs = mins // 60
-    rem_m = mins % 60
-    if hrs > 0:
-        return f"{hrs}h {rem_m}m"
-    return f"{rem_m}m"
-
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Google Sheets helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -303,29 +155,37 @@ def gs_retry(func, *args, **kwargs):
 
 
 @st.cache_resource
-def get_worksheet():
-    """Open spreadsheet by key and return/create a stable 'Responses' worksheet."""
+def get_spreadsheet():
+    """Open the single spreadsheet."""
     if not SHEETS_MODE:
         raise RuntimeError("Sheets mode disabled (missing secrets or gspread not installed).")
 
     sa_dict = _get_secret_any(["gcp_service_account"], ["general", "gcp_service_account"])
-    sheet_id = _get_secret_any(
-        ["GSHEET_ID"], ["general", "GSHEET_ID"], ["gcp_service_account", "GSHEET_ID"]
-    )
+    sheet_id = _get_secret_any(["GSHEET_ID"], ["general", "GSHEET_ID"])
 
     gc = gspread.service_account_from_dict(sa_dict)
     sh = gs_retry(gc.open_by_key, sheet_id)
+    return sh
 
+
+def _ensure_worksheet(sh, title: str, rows: int = 2000, cols: int = 50):
     try:
-        ws = sh.worksheet("Responses")
+        return sh.worksheet(title)
     except WorksheetNotFound:
-        ws = sh.add_worksheet(title="Responses", rows=1, cols=120)
-    return ws
+        return sh.add_worksheet(title=title, rows=rows, cols=cols)
 
 
-@st.cache_resource
-def init_sheet_headers(desired_header: list[str]) -> list[str]:
-    ws = get_worksheet()
+def _ws_get_df(ws) -> pd.DataFrame:
+    values = gs_retry(ws.get_all_values)
+    if not values:
+        return pd.DataFrame()
+    header, rows = values[0], values[1:]
+    if not header:
+        return pd.DataFrame()
+    return pd.DataFrame(rows, columns=header)
+
+
+def _ws_ensure_header(ws, desired_header: list[str]) -> list[str]:
     header = gs_retry(ws.row_values, 1)
     if not header:
         gs_retry(ws.update, "1:1", [desired_header])
@@ -337,22 +197,44 @@ def init_sheet_headers(desired_header: list[str]) -> list[str]:
     return header
 
 
-def sheet_get_df(ws) -> pd.DataFrame:
-    values = gs_retry(ws.get_all_values)
-    if not values:
-        return pd.DataFrame()
-    header, rows = values[0], values[1:]
-    return pd.DataFrame(rows, columns=header)
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_config_serving_df_sheets() -> pd.DataFrame:
+    sh = get_spreadsheet()
+    ws = _ensure_worksheet(sh, SHEET_TAB_SERVING, rows=4000, cols=10)
+    return _ws_get_df(ws)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_config_deadlines_df_sheets() -> pd.DataFrame:
+    sh = get_spreadsheet()
+    ws = _ensure_worksheet(sh, SHEET_TAB_DEADLINES, rows=500, cols=10)
+    return _ws_get_df(ws)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_config_service_dates_df_sheets() -> pd.DataFrame:
+    sh = get_spreadsheet()
+    ws = _ensure_worksheet(sh, SHEET_TAB_DATES, rows=4000, cols=10)
+    return _ws_get_df(ws)
 
 
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_responses_df_sheets() -> pd.DataFrame:
-    ws = get_worksheet()
-    return sheet_get_df(ws)
+    sh = get_spreadsheet()
+    ws = _ensure_worksheet(sh, SHEET_TAB_RESPONSES, rows=8000, cols=200)
+    return _ws_get_df(ws)
+
+
+def append_response_row_sheets(desired_header: list[str], row_map: dict):
+    sh = get_spreadsheet()
+    ws = _ensure_worksheet(sh, SHEET_TAB_RESPONSES, rows=8000, cols=max(200, len(desired_header) + 10))
+    header = _ws_ensure_header(ws, desired_header)
+    row = [row_map.get(col, "") for col in header]
+    gs_retry(ws.append_row, row)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Local CSV fallback
+# Local CSV fallback for responses
 # ──────────────────────────────────────────────────────────────────────────────
 def ensure_local_headers(desired_header: list[str]) -> list[str]:
     if not LOCAL_RESP_PATH.exists():
@@ -398,6 +280,15 @@ def clear_responses_cache():
             fn.clear()
         except Exception:
             pass
+    for fn in (
+        fetch_config_serving_df_sheets,
+        fetch_config_deadlines_df_sheets,
+        fetch_config_service_dates_df_sheets,
+    ):
+        try:
+            fn.clear()
+        except Exception:
+            pass
     try:
         st.cache_data.clear()
     except Exception:
@@ -405,46 +296,48 @@ def clear_responses_cache():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Non-responders
+# Time helpers
 # ──────────────────────────────────────────────────────────────────────────────
-def compute_nonresponders(serving_base_df: pd.DataFrame, responses_df: pd.DataFrame) -> pd.DataFrame:
-    if serving_base_df is None or serving_base_df.empty:
-        return pd.DataFrame(columns=["Director", "Serving Girl"])
-    sb = serving_base_df[["Director", "Serving Girl"]].copy()
-    sb["Director"] = sb["Director"].astype(str).str.strip()
-    sb["Serving Girl"] = sb["Serving Girl"].astype(str).str.strip()
-    sb = sb[(sb["Director"] != "") & (sb["Serving Girl"] != "")].drop_duplicates()
+def get_now_in_tz(tz_name: str) -> datetime:
+    if ZoneInfo is None:
+        return datetime.utcnow()
+    return datetime.now(ZoneInfo(tz_name))
 
-    if responses_df is None or responses_df.empty:
-        out = sb.copy()
-        out["Responded"] = False
-        out["Last submission"] = ""
-        return out
 
-    cols = list(responses_df.columns)
-    ts_col = "timestamp" if "timestamp" in cols else (cols[0] if cols else "timestamp")
+def parse_deadline_local(deadline_local: str, tz_name: str) -> datetime:
+    dt_naive = datetime.strptime(deadline_local, "%Y-%m-%d %H:%M")
+    if ZoneInfo is None:
+        return dt_naive
+    return dt_naive.replace(tzinfo=ZoneInfo(tz_name))
 
-    use_cols = [c for c in cols if c in ["Director", "Serving Girl"] or c == ts_col]
-    resp = responses_df[use_cols].copy()
-    if ts_col not in resp.columns:
-        resp[ts_col] = ""
-    resp.rename(columns={ts_col: "Last submission"}, inplace=True)
 
-    resp["Director"] = resp["Director"].astype(str).str.strip()
-    resp["Serving Girl"] = resp["Serving Girl"].astype(str).str.strip()
+def add_one_month(dt: datetime) -> datetime:
+    y, m = dt.year, dt.month
+    if m == 12:
+        y2, m2 = y + 1, 1
+    else:
+        y2, m2 = y, m + 1
+    if dt.tzinfo:
+        return datetime(y2, m2, 1, tzinfo=dt.tzinfo)
+    return datetime(y2, m2, 1)
 
-    resp = resp.sort_values("Last submission").drop_duplicates(
-        subset=["Director", "Serving Girl"], keep="last"
-    )
 
-    merged = sb.merge(resp, on=["Director", "Serving Girl"], how="left")
-    merged["Responded"] = merged["Last submission"].notna() & (merged["Last submission"] != "")
-    nonresp = merged[~merged["Responded"]].copy()
-    return nonresp.sort_values(["Director", "Serving Girl"]).reset_index(drop=True)
+def get_target_month_key(now_local: datetime) -> str:
+    """In Feb -> target is Mar, in Mar -> target is Apr, etc."""
+    return add_one_month(now_local).strftime("%Y-%m")
+
+
+def format_minutes_remaining(delta_seconds: float) -> str:
+    mins = max(0, int(delta_seconds // 60))
+    hrs = mins // 60
+    rem_m = mins % 60
+    if hrs > 0:
+        return f"{hrs}h {rem_m}m"
+    return f"{rem_m}m"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Dynamic rules
+# Business rules
 # ──────────────────────────────────────────────────────────────────────────────
 def required_yes_for_count(n_dates: int) -> int:
     # - 5 dates => must say YES to at least 3
@@ -480,39 +373,139 @@ def build_human_report(
     return "\n".join(lines)
 
 
+def _safe_parse_date_ymd(s: str) -> datetime:
+    try:
+        return datetime.strptime(str(s).strip(), "%Y-%m-%d")
+    except Exception:
+        return datetime(1900, 1, 1)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Load input data
+# Load config (from Google Sheets if available, else CSV)
+# ──────────────────────────────────────────────────────────────────────────────
+def load_serving_base() -> pd.DataFrame:
+    if SHEETS_MODE:
+        df = fetch_config_serving_df_sheets()
+    else:
+        df = _read_csv_any(SB_PATH)
+
+    df = _normalize_columns(df)
+    needed = {"Director", "Serving Girl"}
+    miss = needed - set(df.columns)
+    if miss:
+        raise RuntimeError(f"ServingBase missing columns: {', '.join(sorted(miss))}")
+
+    df["Director"] = df["Director"].astype(str).str.strip()
+    df["Serving Girl"] = df["Serving Girl"].astype(str).str.strip()
+    df = df[(df["Director"] != "") & (df["Serving Girl"] != "")].drop_duplicates()
+    return df
+
+
+def load_deadlines() -> pd.DataFrame:
+    if SHEETS_MODE:
+        df = fetch_config_deadlines_df_sheets()
+    else:
+        df = _read_csv_any(DEADLINES_PATH)
+
+    df = _normalize_columns(df)
+    needed = {"month", "deadline_local", "timezone"}
+    miss = needed - set(df.columns)
+    if miss:
+        raise RuntimeError(f"Deadlines missing columns: {', '.join(sorted(miss))}")
+
+    df["month"] = df["month"].astype(str).str.strip()
+    df["deadline_local"] = df["deadline_local"].astype(str).str.strip()
+    df["timezone"] = df["timezone"].astype(str).str.strip()
+    return df
+
+
+def load_service_dates() -> pd.DataFrame:
+    if SHEETS_MODE:
+        df = fetch_config_service_dates_df_sheets()
+    else:
+        df = _read_csv_any(DATES_PATH)
+
+    df = _normalize_columns(df)
+    needed = {"target_month", "date", "label", "is_service_day"}
+    miss = needed - set(df.columns)
+    if miss:
+        raise RuntimeError(f"ServiceDates missing columns: {', '.join(sorted(miss))}")
+
+    df["target_month"] = df["target_month"].astype(str).str.strip()
+    df["date"] = df["date"].astype(str).str.strip()
+    df["label"] = df["label"].astype(str).str.strip()
+
+    def _to_int(x):
+        try:
+            return int(float(x))
+        except Exception:
+            return 0
+
+    df["is_service_day"] = df["is_service_day"].fillna(0).map(_to_int)
+    return df
+
+
+def build_serving_map(sb: pd.DataFrame) -> dict:
+    return (
+        sb.groupby("Director")["Serving Girl"]
+        .apply(lambda s: sorted({x for x in s if x}))
+        .to_dict()
+    )
+
+
+def get_deadline_for_target_month(deadlines_df: pd.DataFrame, target_month_key: str):
+    tz_guess = "Africa/Johannesburg"
+    if not deadlines_df.empty and str(deadlines_df["timezone"].iloc[0]).strip():
+        tz_guess = str(deadlines_df["timezone"].iloc[0]).strip()
+
+    match = deadlines_df[deadlines_df["month"] == target_month_key]
+    if match.empty:
+        return None, tz_guess
+
+    row = match.iloc[0]
+    tz_name = str(row["timezone"]).strip() or tz_guess
+    deadline_dt = parse_deadline_local(str(row["deadline_local"]).strip(), tz_name)
+    return deadline_dt, tz_name
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Load data with error handling
 # ──────────────────────────────────────────────────────────────────────────────
 try:
-    _base_questions, serving_base, serving_map = load_base_questions_and_serving()
+    serving_base = load_serving_base()
+    serving_map = build_serving_map(serving_base)
+    deadlines_df = load_deadlines() if (SHEETS_MODE or DEADLINES_PATH.exists()) else pd.DataFrame()
     service_dates_all = load_service_dates()
 except Exception as e:
     st.error(f"Data load error: {e}")
     with st.expander("Debug info"):
-        st.code(str(BASE_Q_PATH))
-        st.code(str(DATES_PATH))
-        st.code(str(SB_PATH))
-        try:
-            st.write("Directory listing of ./data:", [p.name for p in DATA_DIR.iterdir()])
-        except Exception:
-            st.write("Could not list ./data")
+        st.write(
+            {
+                "SHEETS_MODE": SHEETS_MODE,
+                "gspread_installed": gspread is not None,
+                "GSHEET_ID_present": bool(_get_secret_any(["GSHEET_ID"], ["general", "GSHEET_ID"])),
+                "has_gcp_service_account_block": bool(
+                    _get_secret_any(["gcp_service_account"], ["general", "gcp_service_account"])
+                ),
+                "CSV_files_present": {p.name: p.exists() for p in [SB_PATH, DEADLINES_PATH, DATES_PATH]},
+            }
+        )
     st.stop()
 
-# Determine base timezone (prefer deadlines.csv timezone if present)
+# Base timezone: first row's timezone (if set), else Johannesburg
 BASE_TZ = "Africa/Johannesburg"
 try:
-    if DEADLINES_PATH.exists():
-        ddf = load_deadlines()
-        if not ddf.empty and str(ddf["timezone"].iloc[0]).strip():
-            BASE_TZ = str(ddf["timezone"].iloc[0]).strip()
+    if deadlines_df is not None and not deadlines_df.empty:
+        tz0 = str(deadlines_df["timezone"].iloc[0]).strip()
+        if tz0:
+            BASE_TZ = tz0
 except Exception:
     pass
 
-# Target month is next month
 now_base = get_now_in_tz(BASE_TZ)
 target_month_key = get_target_month_key(now_base)
 
-# Pull only that month's service dates
+# Filter dates for the target month (next month)
 month_dates = service_dates_all[
     (service_dates_all["target_month"] == target_month_key)
     & (service_dates_all["is_service_day"] == 1)
@@ -530,86 +523,68 @@ if month_dates.empty:
     )
     st.stop()
 
-# Sort by actual date
-def _safe_parse_date(s):
-    try:
-        return datetime.strptime(str(s), "%Y-%m-%d")
-    except Exception:
-        return datetime(1900, 1, 1)
-
-month_dates["_sort"] = month_dates["date"].map(_safe_parse_date)
+month_dates["_sort"] = month_dates["date"].map(_safe_parse_date_ymd)
 month_dates = month_dates.sort_values("_sort").drop(columns=["_sort"])
 
 date_labels = month_dates["label"].astype(str).tolist()
-n_dates = len(date_labels)
-required_yes = required_yes_for_count(n_dates)
+required_yes = required_yes_for_count(len(date_labels))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Deadline enforcement + ONLY-screen closed message (green + bigger bottom line)
 # ──────────────────────────────────────────────────────────────────────────────
-deadline_dt = None
-deadline_tz = BASE_TZ
+deadline_dt, deadline_tz = (None, BASE_TZ)
+is_closed = False
 
-try:
-    if DEADLINES_PATH.exists():
-        deadlines_df = load_deadlines()
-        deadline_dt, deadline_tz = get_deadline_for_target_month(deadlines_df, target_month_key)
-
-        # If no row for this target month, treat as closed
-        is_closed = deadline_dt is None
-
-        if not is_closed:
-            now_local = get_now_in_tz(deadline_tz)
-            is_closed = (deadline_dt - now_local).total_seconds() <= 0
-
-        if is_closed:
-            # target month name (e.g., March)
-            target_month_dt = datetime.strptime(target_month_key, "%Y-%m")
-            target_month_name = target_month_dt.strftime("%B")
-
-            # next availability cycle month (e.g., April)
-            next_cycle_dt = add_one_month(target_month_dt)
-            next_cycle_name = next_cycle_dt.strftime("%B")
-
-            # open date is 1st of the target month (e.g., "1 March")
-            open_date_str = target_month_dt.strftime("1 %B")
-
-            st.markdown(
-                f"""
-                ## 🔒 {target_month_name} availability submissions are now closed.
-
-                If you have not submitted your dates, please contact your director.
-
-                <hr style="margin:30px 0;">
-
-                <div style="
-                    color: #1e7e34;
-                    font-size: 24px;
-                    font-weight: 600;
-                ">
-                    {next_cycle_name} availability submissions will open on {open_date_str}.
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.stop()
-
-        # If open, show countdown info and refresh every 60 seconds (minute countdown)
-        now_local = get_now_in_tz(deadline_tz)
-        remaining_seconds = (deadline_dt - now_local).total_seconds()
-        st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
-        st.info(
-            f"🗓️ Submitting availability for **{target_month_key}**.\n\n"
-            f"✅ You must select **YES** for at least **{required_yes}** date(s) "
-            f"(this month has **{n_dates}** service dates).\n\n"
-            f"⏳ Form closes at **{deadline_dt.strftime('%Y-%m-%d %H:%M')}** ({deadline_tz}). "
-            f"Time remaining: **{format_minutes_remaining(remaining_seconds)}**"
-        )
+if deadlines_df is None or deadlines_df.empty:
+    # If deadlines missing, we allow form but no closure
+    st.warning("⚠️ Deadlines are not configured. Deadline enforcement is OFF.")
+else:
+    deadline_dt, deadline_tz = get_deadline_for_target_month(deadlines_df, target_month_key)
+    if deadline_dt is None:
+        is_closed = True
     else:
-        st.warning("⚠️ deadlines.csv not found. Deadline enforcement is OFF.")
-except Exception as e:
-    st.warning(f"⚠️ Deadline check error: {e}. Deadline enforcement is OFF.")
+        now_local = get_now_in_tz(deadline_tz)
+        is_closed = (deadline_dt - now_local).total_seconds() <= 0
 
+    if is_closed:
+        target_month_dt = datetime.strptime(target_month_key, "%Y-%m")
+        target_month_name = target_month_dt.strftime("%B")
+
+        next_cycle_dt = add_one_month(target_month_dt)
+        next_cycle_name = next_cycle_dt.strftime("%B")
+
+        open_date_str = target_month_dt.strftime("1 %B")
+
+        st.markdown(
+            f"""
+            ## 🔒 {target_month_name} availability submissions are now closed.
+
+            If you have not submitted your dates, please contact your director.
+
+            <hr style="margin:30px 0;">
+
+            <div style="
+                color: #1e7e34;
+                font-size: 24px;
+                font-weight: 600;
+            ">
+                {next_cycle_name} availability submissions will open on {open_date_str}.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.stop()
+
+    # If open, show countdown info and refresh every 60 seconds
+    now_local = get_now_in_tz(deadline_tz)
+    remaining_seconds = (deadline_dt - now_local).total_seconds()
+    st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
+    st.info(
+        f"🗓️ Submitting availability for **{target_month_key}**.\n\n"
+        f"✅ You must select **YES** for at least **{required_yes}** date(s).\n\n"
+        f"⏳ Form closes at **{deadline_dt.strftime('%Y-%m-%d %H:%M')}** ({deadline_tz}). "
+        f"Time remaining: **{format_minutes_remaining(remaining_seconds)}**"
+    )
 
 # ──────────────────────────────────────────────────────────────────────────────
 # UI state
@@ -617,7 +592,6 @@ except Exception as e:
 if "answers" not in st.session_state:
     st.session_state.answers = {}
 answers = st.session_state.answers
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Form UI
@@ -659,15 +633,14 @@ for lbl in date_labels:
 yes_cnt = yes_count_from_labels(answers, date_labels)
 needs_reason = yes_cnt < required_yes
 
-# Reason box (dynamic rule)
-reason_text = answers.get("Q_REASON", "")
 if needs_reason:
     answers["Q_REASON"] = st.text_area(
         f"Please provide a reason why you cannot serve **{required_yes}** time(s) this month:",
-        value=reason_text,
+        value=answers.get("Q_REASON", ""),
     )
 else:
-    answers["Q_REASON"] = reason_text
+    # keep whatever they typed previously, but not required
+    answers["Q_REASON"] = answers.get("Q_REASON", "")
 
 # Review
 st.subheader("Review")
@@ -680,7 +653,6 @@ with c3:
     st.metric("Yes count", yes_cnt)
 with c4:
     st.metric("Required YES", required_yes)
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Submit (sticky)
@@ -725,7 +697,6 @@ if submitted:
         errors["Q1"] = "Please select a director."
     if not answers.get("Q2"):
         errors["Q2"] = "Please select your name."
-
     if needs_reason:
         if not answers.get("Q_REASON") or len(str(answers["Q_REASON"]).strip()) < 5:
             errors["Q_REASON"] = "Please provide a brief reason (at least 5 characters)."
@@ -750,10 +721,7 @@ if submitted:
 
         try:
             if SHEETS_MODE:
-                ws = get_worksheet()
-                header = init_sheet_headers(desired_header)
-                row = [row_map.get(col, "") for col in header]
-                gs_retry(ws.append_row, row)
+                append_response_row_sheets(desired_header, row_map)
                 clear_responses_cache()
                 st.success("Submission saved to Google Sheets.")
             else:
@@ -781,12 +749,46 @@ if submitted:
             mime="text/plain",
         )
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Admin: exports + non-responders + diagnostics
 # ──────────────────────────────────────────────────────────────────────────────
+def compute_nonresponders(serving_base_df: pd.DataFrame, responses_df: pd.DataFrame) -> pd.DataFrame:
+    if serving_base_df is None or serving_base_df.empty:
+        return pd.DataFrame(columns=["Director", "Serving Girl"])
+
+    sb = serving_base_df[["Director", "Serving Girl"]].copy()
+    sb["Director"] = sb["Director"].astype(str).str.strip()
+    sb["Serving Girl"] = sb["Serving Girl"].astype(str).str.strip()
+    sb = sb[(sb["Director"] != "") & (sb["Serving Girl"] != "")].drop_duplicates()
+
+    if responses_df is None or responses_df.empty:
+        out = sb.copy()
+        out["Responded"] = False
+        out["Last submission"] = ""
+        return out
+
+    cols = list(responses_df.columns)
+    ts_col = "timestamp" if "timestamp" in cols else (cols[0] if cols else "timestamp")
+    use_cols = [c for c in cols if c in ["Director", "Serving Girl"] or c == ts_col]
+    resp = responses_df[use_cols].copy()
+    if ts_col not in resp.columns:
+        resp[ts_col] = ""
+    resp.rename(columns={ts_col: "Last submission"}, inplace=True)
+
+    resp["Director"] = resp["Director"].astype(str).str.strip()
+    resp["Serving Girl"] = resp["Serving Girl"].astype(str).str.strip()
+    resp = resp.sort_values("Last submission").drop_duplicates(
+        subset=["Director", "Serving Girl"], keep="last"
+    )
+
+    merged = sb.merge(resp, on=["Director", "Serving Girl"], how="left")
+    merged["Responded"] = merged["Last submission"].notna() & (merged["Last submission"] != "")
+    nonresp = merged[~merged["Responded"]].copy()
+    return nonresp.sort_values(["Director", "Serving Girl"]).reset_index(drop=True)
+
+
 with st.expander("Admin"):
-    st.caption(f"Mode: {'Google Sheets' if SHEETS_MODE else 'Local CSV'}")
+    st.caption(f"Mode: {'Google Sheets (one sheet, 4 tabs)' if SHEETS_MODE else 'Local CSV'}")
     if not ADMIN_KEY:
         st.info("To protect exports, set an ADMIN_KEY in Streamlit Secrets (optional).")
 
@@ -829,9 +831,7 @@ with st.expander("Admin"):
         st.markdown("### ❌ Non-responders")
         nonresp_df = compute_nonresponders(serving_base, responses_df)
 
-        all_directors = ["All"] + sorted(
-            serving_base["Director"].dropna().astype(str).str.strip().unique().tolist()
-        )
+        all_directors = ["All"] + sorted(serving_base["Director"].unique().tolist())
         sel_dir = st.selectbox("Filter by director", options=all_directors, index=0)
         view_df = nonresp_df if sel_dir == "All" else nonresp_df[nonresp_df["Director"] == sel_dir]
         total_expected = len(serving_base[["Director", "Serving Girl"]].dropna().drop_duplicates())
@@ -846,23 +846,29 @@ with st.expander("Admin"):
         try:
             s = st.secrets
             gsa = s.get("gcp_service_account", {})
-            gs_id = s.get("GSHEET_ID") or s.get("general", {}).get("GSHEET_ID") or gsa.get("GSHEET_ID")
+            gs_id = s.get("GSHEET_ID") or s.get("general", {}).get("GSHEET_ID")
             st.write(
                 {
+                    "SHEETS_MODE": SHEETS_MODE,
                     "has_gcp_service_account_block": bool(gsa),
                     "GSHEET_ID_present": bool(gs_id),
                     "client_email": gsa.get("client_email", "(missing)"),
                     "private_key_id_present": bool(gsa.get("private_key_id")),
                     "private_key_length": len(gsa.get("private_key", "")),
                     "gspread_installed": gspread is not None,
+                    "tabs_expected": [SHEET_TAB_RESPONSES, SHEET_TAB_SERVING, SHEET_TAB_DEADLINES, SHEET_TAB_DATES],
                 }
             )
             if gspread is None:
                 st.warning("gspread not installed. Add 'gspread' and 'google-auth' to requirements.txt and reboot.")
             elif gsa and gs_id:
                 try:
-                    gc = gspread.service_account_from_dict(gsa)
-                    sh = gc.open_by_key(gs_id)
+                    sh = get_spreadsheet()
+                    # Ensure tabs exist (creates if missing)
+                    _ensure_worksheet(sh, SHEET_TAB_RESPONSES, rows=8000, cols=200)
+                    _ensure_worksheet(sh, SHEET_TAB_SERVING, rows=4000, cols=10)
+                    _ensure_worksheet(sh, SHEET_TAB_DEADLINES, rows=500, cols=10)
+                    _ensure_worksheet(sh, SHEET_TAB_DATES, rows=4000, cols=10)
                     st.success(f"✅ Auth OK. Opened sheet: {sh.title}")
                 except Exception as e:
                     st.error(f"❌ Auth test error: {e}")

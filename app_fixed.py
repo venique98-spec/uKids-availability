@@ -1,5 +1,4 @@
 # app_fixed.py
-import re
 import time
 import random
 from io import BytesIO
@@ -59,7 +58,7 @@ st.markdown(
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
-# ✅ New streamlined files
+# Streamlined files
 BASE_Q_PATH = DATA_DIR / "form_base_questions.csv"
 DATES_PATH = DATA_DIR / "service_dates.csv"
 
@@ -69,7 +68,7 @@ SB_PATH = DATA_DIR / "Serving base with allocated directors.csv"
 # Storage
 LOCAL_RESP_PATH = DATA_DIR / "responses_local.csv"
 
-# Deadline file (Option B from earlier)
+# Deadline file (availability month key -> deadline in prior month)
 DEADLINES_PATH = DATA_DIR / "deadlines.csv"
 
 
@@ -205,7 +204,7 @@ def load_service_dates() -> pd.DataFrame:
         label=df["label"].astype(str).str.strip(),
         is_service_day=df["is_service_day"].fillna(0),
     )
-    # Normalize is_service_day to int 0/1
+
     def _to_int(x):
         try:
             return int(float(x))
@@ -213,13 +212,9 @@ def load_service_dates() -> pd.DataFrame:
             return 0
 
     df["is_service_day"] = df["is_service_day"].map(_to_int)
-
     return df
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Deadline helpers (NEXT-month target month logic)
-# ──────────────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def load_deadlines() -> pd.DataFrame:
     df = _normalize_columns(_read_csv_any(DEADLINES_PATH))
@@ -236,6 +231,9 @@ def load_deadlines() -> pd.DataFrame:
     return df
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Time helpers
+# ──────────────────────────────────────────────────────────────────────────────
 def get_now_in_tz(tz_name: str) -> datetime:
     if ZoneInfo is None:
         return datetime.utcnow()
@@ -319,7 +317,7 @@ def get_worksheet():
     try:
         ws = sh.worksheet("Responses")
     except WorksheetNotFound:
-        ws = sh.add_worksheet(title="Responses", rows=1, cols=80)
+        ws = sh.add_worksheet(title="Responses", rows=1, cols=120)
     return ws
 
 
@@ -444,7 +442,7 @@ def compute_nonresponders(serving_base_df: pd.DataFrame, responses_df: pd.DataFr
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Helpers for dynamic month questions
+# Dynamic rules
 # ──────────────────────────────────────────────────────────────────────────────
 def required_yes_for_count(n_dates: int) -> int:
     # Your rule:
@@ -459,7 +457,14 @@ def yes_count_from_labels(answers: dict, labels: list[str]) -> int:
     return sum(1 for lbl in labels if str(answers.get(lbl, "")).strip().lower() == "yes")
 
 
-def build_human_report(target_month_key: str, director: str, name: str, date_labels: list[str], answers: dict, reason: str) -> str:
+def build_human_report(
+    target_month_key: str,
+    director: str,
+    name: str,
+    date_labels: list[str],
+    answers: dict,
+    reason: str,
+) -> str:
     lines = [
         f"Availability month: {target_month_key}",
         f"Director: {director or '—'}",
@@ -478,7 +483,7 @@ def build_human_report(target_month_key: str, director: str, name: str, date_lab
 # Load input data
 # ──────────────────────────────────────────────────────────────────────────────
 try:
-    base_questions, serving_base, serving_map = load_base_questions_and_serving()
+    _base_questions, serving_base, serving_map = load_base_questions_and_serving()
     service_dates_all = load_service_dates()
 except Exception as e:
     st.error(f"Data load error: {e}")
@@ -492,10 +497,7 @@ except Exception as e:
             st.write("Could not list ./data")
     st.stop()
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Determine target month (next month) and load only that month's dates
-# ──────────────────────────────────────────────────────────────────────────────
+# Determine base timezone (prefer deadlines.csv timezone if present)
 BASE_TZ = "Africa/Johannesburg"
 try:
     if DEADLINES_PATH.exists():
@@ -505,18 +507,25 @@ try:
 except Exception:
     pass
 
+# Target month is next month
 now_base = get_now_in_tz(BASE_TZ)
 target_month_key = get_target_month_key(now_base)
 
+# Pull only that month's service dates
 month_dates = service_dates_all[
-    (service_dates_all["target_month"] == target_month_key) & (service_dates_all["is_service_day"] == 1)
+    (service_dates_all["target_month"] == target_month_key)
+    & (service_dates_all["is_service_day"] == 1)
 ].copy()
 
-# If missing dates for target month, close (safer)
 if month_dates.empty:
-    st.error(
-        f"🔒 No service dates found for **{target_month_key}** in service_dates.csv, so the form is CLOSED.\n\n"
-        f"Add rows for target_month = {target_month_key}."
+    st.markdown(
+        f"""
+        ## 🔒 This month’s availability form is not open yet.
+
+        No service dates were found for **{target_month_key}**.
+
+        Please contact your director.
+        """
     )
     st.stop()
 
@@ -534,9 +543,8 @@ date_labels = month_dates["label"].astype(str).tolist()
 n_dates = len(date_labels)
 required_yes = required_yes_for_count(n_dates)
 
-
 # ──────────────────────────────────────────────────────────────────────────────
-# Deadline enforcement (based on target month)
+# Deadline enforcement + ONLY-screen closed message (your requested wording)
 # ──────────────────────────────────────────────────────────────────────────────
 deadline_dt = None
 deadline_tz = BASE_TZ
@@ -550,38 +558,50 @@ try:
 
         if deadline_dt is None:
             is_closed = True
-            st.error(
-                f"🔒 No deadline set for **{target_month_key}** in deadlines.csv, so the form is CLOSED.\n\n"
-                f"Add a row where month={target_month_key} (deadline should be in the previous month)."
-            )
         else:
             now_local = get_now_in_tz(deadline_tz)
             remaining_seconds = (deadline_dt - now_local).total_seconds()
             is_closed = remaining_seconds <= 0
 
-            # Minute-level countdown refresh
-            st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
+        # If closed, show ONLY your message (dynamic month names) and stop.
+        if is_closed:
+            # target month name (e.g., March)
+            target_month_dt = datetime.strptime(target_month_key, "%Y-%m")
+            target_month_name = target_month_dt.strftime("%B")
 
-            if not is_closed:
-                st.info(
-                    f"🗓️ Submitting availability for **{target_month_key}**.\n\n"
-                    f"✅ You must select **YES** for at least **{required_yes}** date(s) "
-                    f"(this month has **{n_dates}** service dates).\n\n"
-                    f"⏳ Form closes at **{deadline_dt.strftime('%Y-%m-%d %H:%M')}** ({deadline_tz}). "
-                    f"Time remaining: **{format_minutes_remaining(remaining_seconds)}**"
-                )
-            else:
-                st.error(
-                    f"🔒 Form is CLOSED for **{target_month_key}** "
-                    f"(deadline was **{deadline_dt.strftime('%Y-%m-%d %H:%M')}** {deadline_tz})."
-                )
+            # next availability cycle month (e.g., April)
+            next_cycle_dt = add_one_month(target_month_dt)
+            next_cycle_name = next_cycle_dt.strftime("%B")
+
+            # open date is 1st of the target month (e.g., "1 March")
+            open_date_str = target_month_dt.strftime("1 %B")
+
+            st.markdown(
+                f"""
+                ## 🔒 {target_month_name} availability submissions are now closed.
+
+                If you have not submitted your dates, please contact your director.
+
+                ---
+
+                **{next_cycle_name} availability submissions will open on {open_date_str}.**
+                """
+            )
+            st.stop()
+
+        # If open, show countdown info and refresh every 60 seconds (minute countdown)
+        st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
+        st.info(
+            f"🗓️ Submitting availability for **{target_month_key}**.\n\n"
+            f"✅ You must select **YES** for at least **{required_yes}** date(s) "
+            f"(this month has **{n_dates}** service dates).\n\n"
+            f"⏳ Form closes at **{deadline_dt.strftime('%Y-%m-%d %H:%M')}** ({deadline_tz}). "
+            f"Time remaining: **{format_minutes_remaining(remaining_seconds)}**"
+        )
     else:
-        # If no deadlines.csv, allow the form (but no countdown)
         st.warning("⚠️ deadlines.csv not found. Deadline enforcement is OFF.")
-        is_closed = False
 except Exception as e:
     st.warning(f"⚠️ Deadline check error: {e}. Deadline enforcement is OFF.")
-    is_closed = False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -602,16 +622,14 @@ answers["Q1"] = st.selectbox(
     "Please select your director’s name",
     options=[""] + directors,
     index=0,
-    disabled=is_closed,
 )
 
-if answers.get("Q1") and not is_closed:
+if answers.get("Q1"):
     girls = serving_map.get(answers["Q1"], [])
     answers["Q2"] = st.selectbox(
         "Please select your name",
         options=[""] + girls,
         index=0,
-        disabled=is_closed,
     )
 else:
     answers["Q2"] = ""
@@ -628,7 +646,6 @@ for lbl in date_labels:
         index=idx,
         key=f"avail_{target_month_key}_{lbl}",
         horizontal=False,
-        disabled=is_closed,
     )
     answers[lbl] = choice
 
@@ -641,10 +658,8 @@ if needs_reason:
     answers["Q_REASON"] = st.text_area(
         f"Please provide a reason why you cannot serve **{required_yes}** time(s) this month:",
         value=reason_text,
-        disabled=is_closed,
     )
 else:
-    # keep whatever they typed previously, but don't force it
     answers["Q_REASON"] = reason_text
 
 # Review
@@ -665,15 +680,31 @@ with c4:
 # ──────────────────────────────────────────────────────────────────────────────
 errors = {}
 st.markdown('<div class="sticky-submit">', unsafe_allow_html=True)
-submitted = st.button("Submit", disabled=is_closed)
+submitted = st.button("Submit")
 st.markdown("</div>", unsafe_allow_html=True)
 
 if submitted:
-    # Hard deadline enforcement at submit time
+    # Hard deadline enforcement at submit time too (safety)
     if deadline_dt is not None:
         now_check = get_now_in_tz(deadline_tz)
         if (deadline_dt - now_check).total_seconds() <= 0:
-            st.error("🔒 Sorry, the form is now closed and can’t accept submissions.")
+            target_month_dt = datetime.strptime(target_month_key, "%Y-%m")
+            target_month_name = target_month_dt.strftime("%B")
+            next_cycle_dt = add_one_month(target_month_dt)
+            next_cycle_name = next_cycle_dt.strftime("%B")
+            open_date_str = target_month_dt.strftime("1 %B")
+
+            st.markdown(
+                f"""
+                ## 🔒 {target_month_name} availability submissions are now closed.
+
+                If you have not submitted your dates, please contact your director.
+
+                ---
+
+                **{next_cycle_name} availability submissions will open on {open_date_str}.**
+                """
+            )
             st.stop()
 
     if not answers.get("Q1"):
@@ -681,7 +712,6 @@ if submitted:
     if not answers.get("Q2"):
         errors["Q2"] = "Please select your name."
 
-    # Must meet required YES OR give reason
     if needs_reason:
         if not answers.get("Q_REASON") or len(str(answers["Q_REASON"]).strip()) < 5:
             errors["Q_REASON"] = "Please provide a brief reason (at least 5 characters)."
@@ -692,7 +722,6 @@ if submitted:
     else:
         now = datetime.utcnow().isoformat() + "Z"
 
-        # Store using labels as columns (e.g., "1 March", "Easter Friday", etc.)
         row_map = {
             "timestamp": now,
             "Availability month": target_month_key,
@@ -703,7 +732,6 @@ if submitted:
         for lbl in date_labels:
             row_map[lbl] = (answers.get(lbl) or "No").title()
 
-        # Desired header (stable order)
         desired_header = ["timestamp", "Availability month", "Director", "Serving Girl", "Reason"] + date_labels
 
         try:
@@ -722,7 +750,6 @@ if submitted:
         except Exception as e:
             st.error(f"Failed to save submission: {e}")
 
-        # Screenshot-friendly report
         report_text = build_human_report(
             target_month_key=target_month_key,
             director=answers.get("Q1") or "",

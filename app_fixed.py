@@ -309,7 +309,9 @@ def get_worksheet():
         raise RuntimeError("Sheets mode disabled (missing secrets or gspread not installed).")
 
     sa_dict = _get_secret_any(["gcp_service_account"], ["general", "gcp_service_account"])
-    sheet_id = _get_secret_any(["GSHEET_ID"], ["general", "GSHEET_ID"], ["gcp_service_account", "GSHEET_ID"])
+    sheet_id = _get_secret_any(
+        ["GSHEET_ID"], ["general", "GSHEET_ID"], ["gcp_service_account", "GSHEET_ID"]
+    )
 
     gc = gspread.service_account_from_dict(sa_dict)
     sh = gs_retry(gc.open_by_key, sheet_id)
@@ -445,7 +447,6 @@ def compute_nonresponders(serving_base_df: pd.DataFrame, responses_df: pd.DataFr
 # Dynamic rules
 # ──────────────────────────────────────────────────────────────────────────────
 def required_yes_for_count(n_dates: int) -> int:
-    # Your rule:
     # - 5 dates => must say YES to at least 3
     # - 4 dates => must say YES to at least 2
     if n_dates >= 5:
@@ -544,26 +545,23 @@ n_dates = len(date_labels)
 required_yes = required_yes_for_count(n_dates)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Deadline enforcement + ONLY-screen closed message (your requested wording)
+# Deadline enforcement + ONLY-screen closed message (green + bigger bottom line)
 # ──────────────────────────────────────────────────────────────────────────────
 deadline_dt = None
 deadline_tz = BASE_TZ
-is_closed = False
-remaining_seconds = None
 
 try:
     if DEADLINES_PATH.exists():
         deadlines_df = load_deadlines()
         deadline_dt, deadline_tz = get_deadline_for_target_month(deadlines_df, target_month_key)
 
-        if deadline_dt is None:
-            is_closed = True
-        else:
-            now_local = get_now_in_tz(deadline_tz)
-            remaining_seconds = (deadline_dt - now_local).total_seconds()
-            is_closed = remaining_seconds <= 0
+        # If no row for this target month, treat as closed
+        is_closed = deadline_dt is None
 
-        # If closed, show ONLY your message (dynamic month names) and stop.
+        if not is_closed:
+            now_local = get_now_in_tz(deadline_tz)
+            is_closed = (deadline_dt - now_local).total_seconds() <= 0
+
         if is_closed:
             # target month name (e.g., March)
             target_month_dt = datetime.strptime(target_month_key, "%Y-%m")
@@ -582,14 +580,23 @@ try:
 
                 If you have not submitted your dates, please contact your director.
 
-                ---
+                <hr style="margin:30px 0;">
 
-                **{next_cycle_name} availability submissions will open on {open_date_str}.**
-                """
+                <div style="
+                    color: #1e7e34;
+                    font-size: 24px;
+                    font-weight: 600;
+                ">
+                    {next_cycle_name} availability submissions will open on {open_date_str}.
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
             st.stop()
 
         # If open, show countdown info and refresh every 60 seconds (minute countdown)
+        now_local = get_now_in_tz(deadline_tz)
+        remaining_seconds = (deadline_dt - now_local).total_seconds()
         st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
         st.info(
             f"🗓️ Submitting availability for **{target_month_key}**.\n\n"
@@ -700,10 +707,17 @@ if submitted:
 
                 If you have not submitted your dates, please contact your director.
 
-                ---
+                <hr style="margin:30px 0;">
 
-                **{next_cycle_name} availability submissions will open on {open_date_str}.**
-                """
+                <div style="
+                    color: #1e7e34;
+                    font-size: 24px;
+                    font-weight: 600;
+                ">
+                    {next_cycle_name} availability submissions will open on {open_date_str}.
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
             st.stop()
 

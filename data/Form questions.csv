@@ -6,7 +6,8 @@ Q4,Are you available 8 March?,8 March,radio,yes_no,None,None
 Q5,Are you available 15 March?,15 March,radio,yes_no,None,None
 Q6,Are you available 22 March?,22 March,radio,yes_no,None,None
 Q7,Are you available 29 March? 29 March,radio,yes_no,None,None
-Q7,Please provide a valid reason why you cannot serve three times this month:,Reason,text,None,"Q3,Q4,Q5,Q6",yes_count<=2
+Q8,Please provide a valid reason why you cannot serve three times this month:,Reason,text,None,"Q3,Q4,Q5,Q6",yes_count<=2
+
 
 
 

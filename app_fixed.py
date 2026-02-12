@@ -13,7 +13,7 @@ import streamlit as st
 try:
     from zoneinfo import ZoneInfo
 except Exception:
-    ZoneInfo = None  # Fallback if not available
+    ZoneInfo = None  # fallback
 
 # Optional: Google Sheets libs. If missing, the app runs in Local CSV mode.
 try:
@@ -58,12 +58,20 @@ st.markdown(
 # ──────────────────────────────────────────────────────────────────────────────
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
-FQ_PATH = DATA_DIR / "Form questions.csv"
+
+# ✅ New streamlined files
+BASE_Q_PATH = DATA_DIR / "form_base_questions.csv"
+DATES_PATH = DATA_DIR / "service_dates.csv"
+
+# Existing data file
 SB_PATH = DATA_DIR / "Serving base with allocated directors.csv"
+
+# Storage
 LOCAL_RESP_PATH = DATA_DIR / "responses_local.csv"
 
-# ✅ Deadlines CSV (Option B)
+# Deadline file (Option B from earlier)
 DEADLINES_PATH = DATA_DIR / "deadlines.csv"
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Secrets helpers
@@ -108,6 +116,7 @@ def is_sheets_enabled() -> bool:
 
 SHEETS_MODE = is_sheets_enabled()
 
+
 # ──────────────────────────────────────────────────────────────────────────────
 # CSV loading
 # ──────────────────────────────────────────────────────────────────────────────
@@ -132,22 +141,23 @@ def _read_csv_any(path: Path) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def load_data():
-    fq = _normalize_columns(_read_csv_any(FQ_PATH))
+def load_base_questions_and_serving():
+    base_q = _normalize_columns(_read_csv_any(BASE_Q_PATH))
     sb = _normalize_columns(_read_csv_any(SB_PATH))
 
-    needed_fq = {
+    needed_bq = {
         "QuestionID",
         "QuestionText",
+        "ReportLabel",
         "QuestionType",
-        "Options Source",
+        "OptionsSource",
         "DependsOn",
-        "Show Condition",
+        "ShowCondition",
     }
-    miss_fq = needed_fq - set(fq.columns)
-    if miss_fq:
+    miss_bq = needed_bq - set(base_q.columns)
+    if miss_bq:
         raise RuntimeError(
-            f"`Form questions.csv` missing columns: {', '.join(sorted(miss_fq))}"
+            f"`form_base_questions.csv` missing columns: {', '.join(sorted(miss_bq))}"
         )
 
     needed_sb = {"Director", "Serving Girl"}
@@ -157,16 +167,16 @@ def load_data():
             f"`Serving base with allocated directors.csv` missing columns: {', '.join(sorted(miss_sb))}"
         )
 
-    fq = fq.assign(
-        QuestionID=fq["QuestionID"].astype(str).str.strip(),
-        QuestionText=fq["QuestionText"].astype(str).str.strip(),
-        QuestionType=fq["QuestionType"].astype(str).str.strip(),
-        **{
-            "Options Source": fq["Options Source"].astype(str).str.strip(),
-            "DependsOn": fq["DependsOn"].astype(str).str.strip(),
-            "Show Condition": fq["Show Condition"].astype(str).str.strip(),
-        },
+    base_q = base_q.assign(
+        QuestionID=base_q["QuestionID"].astype(str).str.strip(),
+        QuestionText=base_q["QuestionText"].astype(str).str.strip(),
+        ReportLabel=base_q["ReportLabel"].astype(str).str.strip(),
+        QuestionType=base_q["QuestionType"].astype(str).str.strip(),
+        OptionsSource=base_q["OptionsSource"].astype(str).str.strip(),
+        DependsOn=base_q["DependsOn"].astype(str).str.strip(),
+        ShowCondition=base_q["ShowCondition"].astype(str).str.strip(),
     )
+
     sb = sb.assign(
         Director=sb["Director"].astype(str).str.strip(),
         **{"Serving Girl": sb["Serving Girl"].astype(str).str.strip()},
@@ -177,11 +187,38 @@ def load_data():
         .apply(lambda s: sorted({x for x in s if x}))
         .to_dict()
     )
-    return fq, sb, serving_map
+
+    return base_q, sb, serving_map
+
+
+@st.cache_data(show_spinner=False)
+def load_service_dates() -> pd.DataFrame:
+    df = _normalize_columns(_read_csv_any(DATES_PATH))
+    needed = {"target_month", "date", "label", "is_service_day"}
+    miss = needed - set(df.columns)
+    if miss:
+        raise RuntimeError(f"`service_dates.csv` missing columns: {', '.join(sorted(miss))}")
+
+    df = df.assign(
+        target_month=df["target_month"].astype(str).str.strip(),
+        date=df["date"].astype(str).str.strip(),
+        label=df["label"].astype(str).str.strip(),
+        is_service_day=df["is_service_day"].fillna(0),
+    )
+    # Normalize is_service_day to int 0/1
+    def _to_int(x):
+        try:
+            return int(float(x))
+        except Exception:
+            return 0
+
+    df["is_service_day"] = df["is_service_day"].map(_to_int)
+
+    return df
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# ✅ Deadline helpers (NEXT-month logic)
+# Deadline helpers (NEXT-month target month logic)
 # ──────────────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def load_deadlines() -> pd.DataFrame:
@@ -190,6 +227,7 @@ def load_deadlines() -> pd.DataFrame:
     miss = needed - set(df.columns)
     if miss:
         raise RuntimeError(f"`deadlines.csv` missing columns: {', '.join(sorted(miss))}")
+
     df = df.assign(
         month=df["month"].astype(str).str.strip(),
         deadline_local=df["deadline_local"].astype(str).str.strip(),
@@ -212,29 +250,22 @@ def parse_deadline_local(deadline_local: str, tz_name: str) -> datetime:
 
 
 def add_one_month(dt: datetime) -> datetime:
-    """Add 1 month to dt without external libraries."""
     y, m = dt.year, dt.month
     if m == 12:
         y2, m2 = y + 1, 1
     else:
         y2, m2 = y, m + 1
-    # Keep day as 1 (we only need YYYY-MM)
     if dt.tzinfo:
         return datetime(y2, m2, 1, tzinfo=dt.tzinfo)
     return datetime(y2, m2, 1)
 
 
 def get_target_month_key(now_local: datetime) -> str:
-    """Target month = next month (because you collect next month's availability)."""
-    nxt = add_one_month(now_local)
-    return nxt.strftime("%Y-%m")
+    """In Feb -> target is Mar, in Mar -> target is Apr, etc."""
+    return add_one_month(now_local).strftime("%Y-%m")
 
 
 def get_deadline_for_target_month(deadlines_df: pd.DataFrame, target_month_key: str):
-    """
-    Finds the deadline row for the TARGET month (next month).
-    Example: in Feb, target_month_key = '2026-03' (March availability)
-    """
     tz_guess = "Africa/Johannesburg"
     if not deadlines_df.empty and str(deadlines_df["timezone"].iloc[0]).strip():
         tz_guess = str(deadlines_df["timezone"].iloc[0]).strip()
@@ -256,75 +287,6 @@ def format_minutes_remaining(delta_seconds: float) -> str:
     if hrs > 0:
         return f"{hrs}h {rem_m}m"
     return f"{rem_m}m"
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Labels + report helpers
-# ──────────────────────────────────────────────────────────────────────────────
-def _norm(s: str) -> str:
-    return str(s).replace("\u00A0", " ").replace("\u200B", "").strip().lower()
-
-
-def pick_report_label_col(df: pd.DataFrame):
-    candidates = ["report label", "reportlabel", "label"]
-    cmap = {_norm(c): c for c in df.columns}
-    for cand in candidates:
-        if cand in cmap:
-            return cmap[cand]
-    return None
-
-
-def extract_date_from_label(label: str) -> str:
-    m = re.search(
-        r"(\d{1,2})(?:st|nd|rd|th)?\s+of\s+(October|November|December|Sept|September|Oct|Nov|Dec)",
-        label,
-        flags=re.I,
-    )
-    if m:
-        return f"{m.group(1)} {m.group(2).title().replace('Sept','September').replace('Oct','October').replace('Nov','November').replace('Dec','December')}"
-    m2 = re.search(r"(\d{1,2})\s+(October|November|December)", label, flags=re.I)
-    if m2:
-        return f"{m2.group(1)} {m2.group(2).title()}"
-    return label.strip()
-
-
-def get_report_label(row, report_label_col: str | None) -> str:
-    if report_label_col and report_label_col in row and str(row[report_label_col]).strip():
-        return str(row[report_label_col]).strip()
-    return extract_date_from_label(str(row.get("QuestionText", "")).strip())
-
-
-def yesno_labels(form_questions: pd.DataFrame, report_label_col: str | None) -> list[str]:
-    labels = []
-    rows = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"]
-    for _, r in rows.iterrows():
-        lbl = get_report_label(r, report_label_col)
-        if lbl not in labels:
-            labels.append(lbl)
-    return labels
-
-
-def yes_count(answers: dict, ids) -> int:
-    return sum(1 for qid in ids if str(answers.get(qid, "")).lower() == "yes")
-
-
-def build_human_report(form_questions: pd.DataFrame, answers: dict, report_label_col: str | None) -> str:
-    director = answers.get("Q1") or "—"
-    name = answers.get("Q2") or "—"
-    lines = [f"Director: {director}", f"Serving Girl: {name}", "Availability:"]
-    rows = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"]
-    for _, r in rows.iterrows():
-        qid = str(r["QuestionID"])
-        label = get_report_label(r, report_label_col)
-        val = (answers.get(qid) or "No").title()
-        lines.append(f"{label}: {val}")
-    reason_row = form_questions[(form_questions["QuestionType"].str.lower() == "text")]
-    if not reason_row.empty:
-        rid = str(reason_row.iloc[0]["QuestionID"])
-        reason = (answers.get(rid) or "").strip()
-        if reason:
-            lines.append(f"Reason: {reason}")
-    return "\n".join(lines)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -357,7 +319,7 @@ def get_worksheet():
     try:
         ws = sh.worksheet("Responses")
     except WorksheetNotFound:
-        ws = sh.add_worksheet(title="Responses", rows=1, cols=50)
+        ws = sh.add_worksheet(title="Responses", rows=1, cols=80)
     return ws
 
 
@@ -461,13 +423,16 @@ def compute_nonresponders(serving_base_df: pd.DataFrame, responses_df: pd.DataFr
 
     cols = list(responses_df.columns)
     ts_col = "timestamp" if "timestamp" in cols else (cols[0] if cols else "timestamp")
+
     use_cols = [c for c in cols if c in ["Director", "Serving Girl"] or c == ts_col]
     resp = responses_df[use_cols].copy()
     if ts_col not in resp.columns:
         resp[ts_col] = ""
     resp.rename(columns={ts_col: "Last submission"}, inplace=True)
+
     resp["Director"] = resp["Director"].astype(str).str.strip()
     resp["Serving Girl"] = resp["Serving Girl"].astype(str).str.strip()
+
     resp = resp.sort_values("Last submission").drop_duplicates(
         subset=["Director", "Serving Girl"], keep="last"
     )
@@ -479,14 +444,47 @@ def compute_nonresponders(serving_base_df: pd.DataFrame, responses_df: pd.DataFr
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Helpers for dynamic month questions
+# ──────────────────────────────────────────────────────────────────────────────
+def required_yes_for_count(n_dates: int) -> int:
+    # Your rule:
+    # - 5 dates => must say YES to at least 3
+    # - 4 dates => must say YES to at least 2
+    if n_dates >= 5:
+        return 3
+    return 2
+
+
+def yes_count_from_labels(answers: dict, labels: list[str]) -> int:
+    return sum(1 for lbl in labels if str(answers.get(lbl, "")).strip().lower() == "yes")
+
+
+def build_human_report(target_month_key: str, director: str, name: str, date_labels: list[str], answers: dict, reason: str) -> str:
+    lines = [
+        f"Availability month: {target_month_key}",
+        f"Director: {director or '—'}",
+        f"Serving Girl: {name or '—'}",
+        "Availability:",
+    ]
+    for lbl in date_labels:
+        val = (answers.get(lbl) or "No").title()
+        lines.append(f"{lbl}: {val}")
+    if reason:
+        lines.append(f"Reason: {reason}")
+    return "\n".join(lines)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Load input data
 # ──────────────────────────────────────────────────────────────────────────────
 try:
-    form_questions, serving_base, serving_map = load_data()
+    base_questions, serving_base, serving_map = load_base_questions_and_serving()
+    service_dates_all = load_service_dates()
 except Exception as e:
     st.error(f"Data load error: {e}")
     with st.expander("Debug info"):
-        st.code(str(FQ_PATH))
+        st.code(str(BASE_Q_PATH))
+        st.code(str(DATES_PATH))
         st.code(str(SB_PATH))
         try:
             st.write("Directory listing of ./data:", [p.name for p in DATA_DIR.iterdir()])
@@ -494,70 +492,95 @@ except Exception as e:
             st.write("Could not list ./data")
     st.stop()
 
-REPORT_LABEL_COL = pick_report_label_col(form_questions)
-if not REPORT_LABEL_COL:
-    st.warning("No 'Report Label' column found (exact match not detected). Using auto-detected labels.")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Determine target month (next month) and load only that month's dates
+# ──────────────────────────────────────────────────────────────────────────────
+BASE_TZ = "Africa/Johannesburg"
+try:
+    if DEADLINES_PATH.exists():
+        ddf = load_deadlines()
+        if not ddf.empty and str(ddf["timezone"].iloc[0]).strip():
+            BASE_TZ = str(ddf["timezone"].iloc[0]).strip()
+except Exception:
+    pass
+
+now_base = get_now_in_tz(BASE_TZ)
+target_month_key = get_target_month_key(now_base)
+
+month_dates = service_dates_all[
+    (service_dates_all["target_month"] == target_month_key) & (service_dates_all["is_service_day"] == 1)
+].copy()
+
+# If missing dates for target month, close (safer)
+if month_dates.empty:
+    st.error(
+        f"🔒 No service dates found for **{target_month_key}** in service_dates.csv, so the form is CLOSED.\n\n"
+        f"Add rows for target_month = {target_month_key}."
+    )
+    st.stop()
+
+# Sort by actual date
+def _safe_parse_date(s):
+    try:
+        return datetime.strptime(str(s), "%Y-%m-%d")
+    except Exception:
+        return datetime(1900, 1, 1)
+
+month_dates["_sort"] = month_dates["date"].map(_safe_parse_date)
+month_dates = month_dates.sort_values("_sort").drop(columns=["_sort"])
+
+date_labels = month_dates["label"].astype(str).tolist()
+n_dates = len(date_labels)
+required_yes = required_yes_for_count(n_dates)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# ✅ Deadline enforcement using NEXT month (target month)
+# Deadline enforcement (based on target month)
 # ──────────────────────────────────────────────────────────────────────────────
 deadline_dt = None
-deadline_tz = "Africa/Johannesburg"
-
+deadline_tz = BASE_TZ
 is_closed = False
-target_month_key = None
-now_local = None
 remaining_seconds = None
 
 try:
-    deadlines_df = load_deadlines()
+    if DEADLINES_PATH.exists():
+        deadlines_df = load_deadlines()
+        deadline_dt, deadline_tz = get_deadline_for_target_month(deadlines_df, target_month_key)
 
-    # Use the first timezone as a base guess (or SA)
-    base_tz = "Africa/Johannesburg"
-    if not deadlines_df.empty and str(deadlines_df["timezone"].iloc[0]).strip():
-        base_tz = str(deadlines_df["timezone"].iloc[0]).strip()
-
-    now_local = get_now_in_tz(base_tz)
-
-    # ✅ KEY CHANGE: target month = next month
-    target_month_key = get_target_month_key(now_local)
-
-    # Find deadline row for that target month
-    deadline_dt, deadline_tz = get_deadline_for_target_month(deadlines_df, target_month_key)
-
-    if deadline_dt is None:
-        is_closed = True
-        st.error(
-            f"🔒 No deadline set for **{target_month_key}** in deadlines.csv, so the form is CLOSED. "
-            f"Add a row for {target_month_key} to open it."
-        )
-    else:
-        # Evaluate remaining time against that deadline
-        now_local = get_now_in_tz(deadline_tz)
-        remaining_seconds = (deadline_dt - now_local).total_seconds()
-        is_closed = remaining_seconds <= 0
-
-        # refresh every 60s (minute countdown)
-        st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
-
-        if not is_closed:
-            st.info(
-                f"⏳ Submitting availability for **{target_month_key}**. "
-                f"Form closes at **{deadline_dt.strftime('%Y-%m-%d %H:%M')}** ({deadline_tz}). "
-                f"Time remaining: **{format_minutes_remaining(remaining_seconds)}**"
+        if deadline_dt is None:
+            is_closed = True
+            st.error(
+                f"🔒 No deadline set for **{target_month_key}** in deadlines.csv, so the form is CLOSED.\n\n"
+                f"Add a row where month={target_month_key} (deadline should be in the previous month)."
             )
         else:
-            st.error(
-                f"🔒 Form is CLOSED for availability month **{target_month_key}** "
-                f"(deadline was **{deadline_dt.strftime('%Y-%m-%d %H:%M')}** {deadline_tz})."
-            )
+            now_local = get_now_in_tz(deadline_tz)
+            remaining_seconds = (deadline_dt - now_local).total_seconds()
+            is_closed = remaining_seconds <= 0
 
-except FileNotFoundError:
-    st.warning("⚠️ deadlines.csv not found in /data. Deadline enforcement is OFF until you upload it.")
-    is_closed = False  # allow if deadlines missing
+            # Minute-level countdown refresh
+            st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
+
+            if not is_closed:
+                st.info(
+                    f"🗓️ Submitting availability for **{target_month_key}**.\n\n"
+                    f"✅ You must select **YES** for at least **{required_yes}** date(s) "
+                    f"(this month has **{n_dates}** service dates).\n\n"
+                    f"⏳ Form closes at **{deadline_dt.strftime('%Y-%m-%d %H:%M')}** ({deadline_tz}). "
+                    f"Time remaining: **{format_minutes_remaining(remaining_seconds)}**"
+                )
+            else:
+                st.error(
+                    f"🔒 Form is CLOSED for **{target_month_key}** "
+                    f"(deadline was **{deadline_dt.strftime('%Y-%m-%d %H:%M')}** {deadline_tz})."
+                )
+    else:
+        # If no deadlines.csv, allow the form (but no countdown)
+        st.warning("⚠️ deadlines.csv not found. Deadline enforcement is OFF.")
+        is_closed = False
 except Exception as e:
-    st.warning(f"⚠️ Deadlines file error: {e}. Deadline enforcement is OFF until fixed.")
+    st.warning(f"⚠️ Deadline check error: {e}. Deadline enforcement is OFF.")
     is_closed = False
 
 
@@ -575,68 +598,67 @@ answers = st.session_state.answers
 st.subheader("Your details")
 
 directors = sorted([d for d in serving_map.keys() if d])
-answers["Q1"] = st.selectbox("Please select your director’s name", options=[""] + directors, index=0, disabled=is_closed)
+answers["Q1"] = st.selectbox(
+    "Please select your director’s name",
+    options=[""] + directors,
+    index=0,
+    disabled=is_closed,
+)
 
 if answers.get("Q1") and not is_closed:
     girls = serving_map.get(answers["Q1"], [])
-    answers["Q2"] = st.selectbox("Please select your name", options=[""] + girls, index=0)
+    answers["Q2"] = st.selectbox(
+        "Please select your name",
+        options=[""] + girls,
+        index=0,
+        disabled=is_closed,
+    )
 else:
     answers["Q2"] = ""
 
-st.subheader("Availability")
+st.subheader(f"Availability for {target_month_key}")
 
-availability_questions = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"].copy()
 radio_options = ["Yes", "No"]
-for _, q in availability_questions.iterrows():
-    qid = str(q["QuestionID"])
-    qtext = str(q["QuestionText"])
-
-    saved = answers.get(qid)
+for lbl in date_labels:
+    saved = answers.get(lbl)
     idx = radio_options.index(saved) if saved in radio_options else None
     choice = st.radio(
-        qtext,
+        f"Are you available {lbl}?",
         options=radio_options,
         index=idx,
-        key=f"avail_{qid}",
+        key=f"avail_{target_month_key}_{lbl}",
         horizontal=False,
         disabled=is_closed,
     )
-    answers[qid] = choice
+    answers[lbl] = choice
 
-reason_row_df = form_questions[form_questions["QuestionType"].astype(str).str.lower() == "text"]
-reason_qid = None
-reason_dep_ids = []
+yes_cnt = yes_count_from_labels(answers, date_labels)
+needs_reason = yes_cnt < required_yes
 
-if not reason_row_df.empty:
-    rr = reason_row_df.iloc[0]
-    reason_qid = str(rr["QuestionID"])
-    if pd.notna(rr["DependsOn"]) and str(rr["DependsOn"]).strip().lower() != "none":
-        reason_dep_ids = [s.strip() for s in str(rr["DependsOn"]).split(",") if s.strip()]
+# Reason box (dynamic rule)
+reason_text = answers.get("Q_REASON", "")
+if needs_reason:
+    answers["Q_REASON"] = st.text_area(
+        f"Please provide a reason why you cannot serve **{required_yes}** time(s) this month:",
+        value=reason_text,
+        disabled=is_closed,
+    )
+else:
+    # keep whatever they typed previously, but don't force it
+    answers["Q_REASON"] = reason_text
 
-REASON_YES_THRESHOLD = 2
-
-if reason_qid:
-    show_reason = True
-    if reason_dep_ids:
-        show_reason = yes_count(answers, reason_dep_ids) < REASON_YES_THRESHOLD
-    if show_reason:
-        answers[reason_qid] = st.text_area(
-            str(reason_row_df.iloc[0]["QuestionText"]),
-            value=answers.get(reason_qid, ""),
-            disabled=is_closed,
-        )
-    else:
-        answers[reason_qid] = answers.get(reason_qid, "")
-
+# Review
 st.subheader("Review")
-yes_ids = form_questions[form_questions["Options Source"].str.lower() == "yes_no"]["QuestionID"].astype(str).tolist()
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 with c1:
     st.metric("Director", answers.get("Q1") or "—")
 with c2:
     st.metric("Name", answers.get("Q2") or "—")
 with c3:
-    st.metric("Yes count", yes_count(answers, yes_ids))
+    st.metric("Yes count", yes_cnt)
+with c4:
+    st.metric("Required YES", required_yes)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Submit (sticky)
@@ -647,7 +669,7 @@ submitted = st.button("Submit", disabled=is_closed)
 st.markdown("</div>", unsafe_allow_html=True)
 
 if submitted:
-    # hard enforcement at submit time
+    # Hard deadline enforcement at submit time
     if deadline_dt is not None:
         now_check = get_now_in_tz(deadline_tz)
         if (deadline_dt - now_check).total_seconds() <= 0:
@@ -658,38 +680,41 @@ if submitted:
         errors["Q1"] = "Please select a director."
     if not answers.get("Q2"):
         errors["Q2"] = "Please select your name."
-    if reason_qid and reason_dep_ids and (yes_count(answers, reason_dep_ids) < REASON_YES_THRESHOLD):
-        if not answers.get(reason_qid) or len(answers[reason_qid].strip()) < 5:
-            errors[reason_qid] = "Please provide a brief reason (at least 5 characters)."
+
+    # Must meet required YES OR give reason
+    if needs_reason:
+        if not answers.get("Q_REASON") or len(str(answers["Q_REASON"]).strip()) < 5:
+            errors["Q_REASON"] = "Please provide a brief reason (at least 5 characters)."
 
     if errors:
         for msg in errors.values():
             st.error(msg)
     else:
         now = datetime.utcnow().isoformat() + "Z"
-        labels = yesno_labels(form_questions, REPORT_LABEL_COL)
+
+        # Store using labels as columns (e.g., "1 March", "Easter Friday", etc.)
         row_map = {
             "timestamp": now,
+            "Availability month": target_month_key,
             "Director": answers.get("Q1") or "",
             "Serving Girl": answers.get("Q2") or "",
-            "Reason": (answers.get(reason_qid) or "").strip() if reason_qid else "",
+            "Reason": (answers.get("Q_REASON") or "").strip(),
         }
-        for _, r in availability_questions.iterrows():
-            qid = str(r["QuestionID"])
-            label = get_report_label(r, REPORT_LABEL_COL)
-            row_map[label] = (answers.get(qid) or "No").title()
+        for lbl in date_labels:
+            row_map[lbl] = (answers.get(lbl) or "No").title()
+
+        # Desired header (stable order)
+        desired_header = ["timestamp", "Availability month", "Director", "Serving Girl", "Reason"] + date_labels
 
         try:
             if SHEETS_MODE:
                 ws = get_worksheet()
-                desired_header = ["timestamp", "Director", "Serving Girl", "Reason"] + labels
                 header = init_sheet_headers(desired_header)
                 row = [row_map.get(col, "") for col in header]
                 gs_retry(ws.append_row, row)
                 clear_responses_cache()
                 st.success("Submission saved to Google Sheets.")
             else:
-                desired_header = ["timestamp", "Director", "Serving Girl", "Reason"] + labels
                 header = ensure_local_headers(desired_header)
                 append_row_local(header, row_map)
                 clear_responses_cache()
@@ -697,15 +722,24 @@ if submitted:
         except Exception as e:
             st.error(f"Failed to save submission: {e}")
 
-        report_text = build_human_report(form_questions, answers, REPORT_LABEL_COL)
+        # Screenshot-friendly report
+        report_text = build_human_report(
+            target_month_key=target_month_key,
+            director=answers.get("Q1") or "",
+            name=answers.get("Q2") or "",
+            date_labels=date_labels,
+            answers=answers,
+            reason=(answers.get("Q_REASON") or "").strip(),
+        )
         st.markdown("### 📄 Screenshot-friendly report (text)")
         st.code(report_text, language=None)
         st.download_button(
             "Download report as .txt",
             data=report_text.encode("utf-8"),
-            file_name=f"Availability_{(answers.get('Q2') or 'name').replace(' ', '_')}.txt",
+            file_name=f"Availability_{target_month_key}_{(answers.get('Q2') or 'name').replace(' ', '_')}.txt",
             mime="text/plain",
         )
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Admin: exports + non-responders + diagnostics
@@ -753,12 +787,14 @@ with st.expander("Admin"):
 
         st.markdown("### ❌ Non-responders")
         nonresp_df = compute_nonresponders(serving_base, responses_df)
+
         all_directors = ["All"] + sorted(
             serving_base["Director"].dropna().astype(str).str.strip().unique().tolist()
         )
         sel_dir = st.selectbox("Filter by director", options=all_directors, index=0)
         view_df = nonresp_df if sel_dir == "All" else nonresp_df[nonresp_df["Director"] == sel_dir]
         total_expected = len(serving_base[["Director", "Serving Girl"]].dropna().drop_duplicates())
+
         st.write(
             f"Non-responders shown: **{len(view_df)}**  |  Total expected pairs: **{total_expected}**"
         )

@@ -9,11 +9,11 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-# ✅ NEW: timezone-aware deadlines (built-in on modern Python)
+# ✅ Timezone-aware deadlines
 try:
     from zoneinfo import ZoneInfo
 except Exception:
-    ZoneInfo = None  # If missing, we'll fall back to UTC (less ideal)
+    ZoneInfo = None  # Fallback if not available
 
 # Optional: Google Sheets libs. If missing, the app runs in Local CSV mode.
 try:
@@ -62,9 +62,8 @@ FQ_PATH = DATA_DIR / "Form questions.csv"
 SB_PATH = DATA_DIR / "Serving base with allocated directors.csv"
 LOCAL_RESP_PATH = DATA_DIR / "responses_local.csv"
 
-# ✅ NEW: deadlines CSV (Option B)
+# ✅ Deadlines CSV (Option B)
 DEADLINES_PATH = DATA_DIR / "deadlines.csv"
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Secrets helpers
@@ -182,18 +181,15 @@ def load_data():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# ✅ NEW: Deadline helpers (reads Option B CSV)
+# ✅ Deadline helpers (NEXT-month logic)
 # ──────────────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def load_deadlines() -> pd.DataFrame:
-    """Load data/deadlines.csv with columns: month, deadline_local, timezone"""
     df = _normalize_columns(_read_csv_any(DEADLINES_PATH))
     needed = {"month", "deadline_local", "timezone"}
     miss = needed - set(df.columns)
     if miss:
-        raise RuntimeError(
-            f"`deadlines.csv` missing columns: {', '.join(sorted(miss))}"
-        )
+        raise RuntimeError(f"`deadlines.csv` missing columns: {', '.join(sorted(miss))}")
     df = df.assign(
         month=df["month"].astype(str).str.strip(),
         deadline_local=df["deadline_local"].astype(str).str.strip(),
@@ -204,42 +200,53 @@ def load_deadlines() -> pd.DataFrame:
 
 def get_now_in_tz(tz_name: str) -> datetime:
     if ZoneInfo is None:
-        # Fallback: UTC naive-ish behaviour (not ideal, but avoids crashing)
         return datetime.utcnow()
     return datetime.now(ZoneInfo(tz_name))
 
 
 def parse_deadline_local(deadline_local: str, tz_name: str) -> datetime:
-    """
-    Parses 'YYYY-MM-DD HH:MM' and attaches timezone.
-    """
     dt_naive = datetime.strptime(deadline_local, "%Y-%m-%d %H:%M")
     if ZoneInfo is None:
-        return dt_naive  # fallback
+        return dt_naive
     return dt_naive.replace(tzinfo=ZoneInfo(tz_name))
 
 
-def get_current_month_deadline(deadlines_df: pd.DataFrame):
+def add_one_month(dt: datetime) -> datetime:
+    """Add 1 month to dt without external libraries."""
+    y, m = dt.year, dt.month
+    if m == 12:
+        y2, m2 = y + 1, 1
+    else:
+        y2, m2 = y, m + 1
+    # Keep day as 1 (we only need YYYY-MM)
+    if dt.tzinfo:
+        return datetime(y2, m2, 1, tzinfo=dt.tzinfo)
+    return datetime(y2, m2, 1)
+
+
+def get_target_month_key(now_local: datetime) -> str:
+    """Target month = next month (because you collect next month's availability)."""
+    nxt = add_one_month(now_local)
+    return nxt.strftime("%Y-%m")
+
+
+def get_deadline_for_target_month(deadlines_df: pd.DataFrame, target_month_key: str):
     """
-    Returns (deadline_dt, tz_name, month_key) for the current month.
-    If not found, returns (None, tz_name_guess, month_key).
+    Finds the deadline row for the TARGET month (next month).
+    Example: in Feb, target_month_key = '2026-03' (March availability)
     """
-    # Prefer SA timezone if present; otherwise use first row; otherwise default
     tz_guess = "Africa/Johannesburg"
-    if not deadlines_df.empty and deadlines_df["timezone"].astype(str).str.strip().iloc[0]:
+    if not deadlines_df.empty and str(deadlines_df["timezone"].iloc[0]).strip():
         tz_guess = str(deadlines_df["timezone"].iloc[0]).strip()
 
-    now_guess = get_now_in_tz(tz_guess)
-    month_key = now_guess.strftime("%Y-%m")
-
-    match = deadlines_df[deadlines_df["month"] == month_key]
+    match = deadlines_df[deadlines_df["month"] == target_month_key]
     if match.empty:
-        return None, tz_guess, month_key
+        return None, tz_guess
 
     row = match.iloc[0]
     tz_name = str(row["timezone"]).strip() or tz_guess
     deadline_dt = parse_deadline_local(str(row["deadline_local"]).strip(), tz_name)
-    return deadline_dt, tz_name, month_key
+    return deadline_dt, tz_name
 
 
 def format_minutes_remaining(delta_seconds: float) -> str:
@@ -493,57 +500,65 @@ if not REPORT_LABEL_COL:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# ✅ NEW: Deadline UI + enforcement (uses deadlines.csv)
+# ✅ Deadline enforcement using NEXT month (target month)
 # ──────────────────────────────────────────────────────────────────────────────
 deadline_dt = None
 deadline_tz = "Africa/Johannesburg"
-month_key = None
 
-try:
-    deadlines_df = load_deadlines()
-    deadline_dt, deadline_tz, month_key = get_current_month_deadline(deadlines_df)
-except FileNotFoundError:
-    st.warning("⚠️ deadlines.csv not found in /data. Deadline enforcement is OFF until you upload it.")
-except Exception as e:
-    st.warning(f"⚠️ Deadlines file error: {e}. Deadline enforcement is OFF until fixed.")
-
-# Determine open/closed
 is_closed = False
+target_month_key = None
 now_local = None
 remaining_seconds = None
 
-if deadline_dt is not None:
-    # If we have timezone info, use it; otherwise fall back
-    now_local = get_now_in_tz(deadline_tz)
-    try:
-        remaining_seconds = (deadline_dt - now_local).total_seconds()
-        is_closed = remaining_seconds <= 0
-    except Exception:
-        # If timezone mismatch occurs, be safe: close
+try:
+    deadlines_df = load_deadlines()
+
+    # Use the first timezone as a base guess (or SA)
+    base_tz = "Africa/Johannesburg"
+    if not deadlines_df.empty and str(deadlines_df["timezone"].iloc[0]).strip():
+        base_tz = str(deadlines_df["timezone"].iloc[0]).strip()
+
+    now_local = get_now_in_tz(base_tz)
+
+    # ✅ KEY CHANGE: target month = next month
+    target_month_key = get_target_month_key(now_local)
+
+    # Find deadline row for that target month
+    deadline_dt, deadline_tz = get_deadline_for_target_month(deadlines_df, target_month_key)
+
+    if deadline_dt is None:
         is_closed = True
-
-    # ✅ NEW: refresh every 60s so the countdown updates in minutes
-    # (This does NOT affect submission accuracy; submit is checked server-side below.)
-    st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
-
-    # Show countdown banner
-    if not is_closed:
-        st.info(
-            f"⏳ Form closes for **{month_key}** at **{deadline_dt.strftime('%Y-%m-%d %H:%M')}** ({deadline_tz}). "
-            f"Time remaining: **{format_minutes_remaining(remaining_seconds)}**"
+        st.error(
+            f"🔒 No deadline set for **{target_month_key}** in deadlines.csv, so the form is CLOSED. "
+            f"Add a row for {target_month_key} to open it."
         )
     else:
-        st.error(
-            f"🔒 Form is CLOSED for **{month_key}** (deadline was **{deadline_dt.strftime('%Y-%m-%d %H:%M')}** {deadline_tz})."
-        )
-else:
-    # No deadline row found for this month → safest is CLOSED
-    if month_key:
-        st.error(
-            f"🔒 No deadline set for **{month_key}** in deadlines.csv, so the form is CLOSED. "
-            f"Add a row for {month_key} to open it."
-        )
-    is_closed = True
+        # Evaluate remaining time against that deadline
+        now_local = get_now_in_tz(deadline_tz)
+        remaining_seconds = (deadline_dt - now_local).total_seconds()
+        is_closed = remaining_seconds <= 0
+
+        # refresh every 60s (minute countdown)
+        st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
+
+        if not is_closed:
+            st.info(
+                f"⏳ Submitting availability for **{target_month_key}**. "
+                f"Form closes at **{deadline_dt.strftime('%Y-%m-%d %H:%M')}** ({deadline_tz}). "
+                f"Time remaining: **{format_minutes_remaining(remaining_seconds)}**"
+            )
+        else:
+            st.error(
+                f"🔒 Form is CLOSED for availability month **{target_month_key}** "
+                f"(deadline was **{deadline_dt.strftime('%Y-%m-%d %H:%M')}** {deadline_tz})."
+            )
+
+except FileNotFoundError:
+    st.warning("⚠️ deadlines.csv not found in /data. Deadline enforcement is OFF until you upload it.")
+    is_closed = False  # allow if deadlines missing
+except Exception as e:
+    st.warning(f"⚠️ Deadlines file error: {e}. Deadline enforcement is OFF until fixed.")
+    is_closed = False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -560,9 +575,9 @@ answers = st.session_state.answers
 st.subheader("Your details")
 
 directors = sorted([d for d in serving_map.keys() if d])
-answers["Q1"] = st.selectbox("Please select your director’s name", options=[""] + directors, index=0)
+answers["Q1"] = st.selectbox("Please select your director’s name", options=[""] + directors, index=0, disabled=is_closed)
 
-if answers.get("Q1"):
+if answers.get("Q1") and not is_closed:
     girls = serving_map.get(answers["Q1"], [])
     answers["Q2"] = st.selectbox("Please select your name", options=[""] + girls, index=0)
 else:
@@ -572,25 +587,22 @@ st.subheader("Availability")
 
 availability_questions = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"].copy()
 radio_options = ["Yes", "No"]
-
-# ✅ NEW: If closed, disable the radios so people can still *see* but not submit
 for _, q in availability_questions.iterrows():
     qid = str(q["QuestionID"])
     qtext = str(q["QuestionText"])
 
     saved = answers.get(qid)
-    idx = radio_options.index(saved) if saved in radio_options else None  # no default
+    idx = radio_options.index(saved) if saved in radio_options else None
     choice = st.radio(
         qtext,
         options=radio_options,
         index=idx,
         key=f"avail_{qid}",
         horizontal=False,
-        disabled=is_closed,  # ✅ NEW
+        disabled=is_closed,
     )
     answers[qid] = choice
 
-# Find the Reason (text) row dynamically (Q8 in your CSV)
 reason_row_df = form_questions[form_questions["QuestionType"].astype(str).str.lower() == "text"]
 reason_qid = None
 reason_dep_ids = []
@@ -611,12 +623,11 @@ if reason_qid:
         answers[reason_qid] = st.text_area(
             str(reason_row_df.iloc[0]["QuestionText"]),
             value=answers.get(reason_qid, ""),
-            disabled=is_closed,  # ✅ NEW
+            disabled=is_closed,
         )
     else:
         answers[reason_qid] = answers.get(reason_qid, "")
 
-# Review
 st.subheader("Review")
 yes_ids = form_questions[form_questions["Options Source"].str.lower() == "yes_no"]["QuestionID"].astype(str).tolist()
 c1, c2, c3 = st.columns(3)
@@ -627,28 +638,21 @@ with c2:
 with c3:
     st.metric("Yes count", yes_count(answers, yes_ids))
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Submit (sticky)
 # ──────────────────────────────────────────────────────────────────────────────
 errors = {}
 st.markdown('<div class="sticky-submit">', unsafe_allow_html=True)
-
-# ✅ NEW: disable submit button if closed
 submitted = st.button("Submit", disabled=is_closed)
-
 st.markdown("</div>", unsafe_allow_html=True)
 
 if submitted:
-    # ✅ NEW: hard enforcement at submit time using server time
+    # hard enforcement at submit time
     if deadline_dt is not None:
-        now_local = get_now_in_tz(deadline_tz)
-        if (deadline_dt - now_local).total_seconds() <= 0:
+        now_check = get_now_in_tz(deadline_tz)
+        if (deadline_dt - now_check).total_seconds() <= 0:
             st.error("🔒 Sorry, the form is now closed and can’t accept submissions.")
             st.stop()
-    else:
-        st.error("🔒 Sorry, the form is closed (no deadline set for this month).")
-        st.stop()
 
     if not answers.get("Q1"):
         errors["Q1"] = "Please select a director."
@@ -702,7 +706,6 @@ if submitted:
             file_name=f"Availability_{(answers.get('Q2') or 'name').replace(' ', '_')}.txt",
             mime="text/plain",
         )
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Admin: exports + non-responders + diagnostics

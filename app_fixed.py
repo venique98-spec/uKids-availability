@@ -9,6 +9,12 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+# ✅ NEW: timezone-aware deadlines (built-in on modern Python)
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None  # If missing, we'll fall back to UTC (less ideal)
+
 # Optional: Google Sheets libs. If missing, the app runs in Local CSV mode.
 try:
     import gspread
@@ -55,6 +61,10 @@ DATA_DIR.mkdir(exist_ok=True)
 FQ_PATH = DATA_DIR / "Form questions.csv"
 SB_PATH = DATA_DIR / "Serving base with allocated directors.csv"
 LOCAL_RESP_PATH = DATA_DIR / "responses_local.csv"
+
+# ✅ NEW: deadlines CSV (Option B)
+DEADLINES_PATH = DATA_DIR / "deadlines.csv"
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Secrets helpers
@@ -164,9 +174,81 @@ def load_data():
     )
 
     serving_map = (
-        sb.groupby("Director")["Serving Girl"].apply(lambda s: sorted({x for x in s if x})).to_dict()
+        sb.groupby("Director")["Serving Girl"]
+        .apply(lambda s: sorted({x for x in s if x}))
+        .to_dict()
     )
     return fq, sb, serving_map
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ✅ NEW: Deadline helpers (reads Option B CSV)
+# ──────────────────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def load_deadlines() -> pd.DataFrame:
+    """Load data/deadlines.csv with columns: month, deadline_local, timezone"""
+    df = _normalize_columns(_read_csv_any(DEADLINES_PATH))
+    needed = {"month", "deadline_local", "timezone"}
+    miss = needed - set(df.columns)
+    if miss:
+        raise RuntimeError(
+            f"`deadlines.csv` missing columns: {', '.join(sorted(miss))}"
+        )
+    df = df.assign(
+        month=df["month"].astype(str).str.strip(),
+        deadline_local=df["deadline_local"].astype(str).str.strip(),
+        timezone=df["timezone"].astype(str).str.strip(),
+    )
+    return df
+
+
+def get_now_in_tz(tz_name: str) -> datetime:
+    if ZoneInfo is None:
+        # Fallback: UTC naive-ish behaviour (not ideal, but avoids crashing)
+        return datetime.utcnow()
+    return datetime.now(ZoneInfo(tz_name))
+
+
+def parse_deadline_local(deadline_local: str, tz_name: str) -> datetime:
+    """
+    Parses 'YYYY-MM-DD HH:MM' and attaches timezone.
+    """
+    dt_naive = datetime.strptime(deadline_local, "%Y-%m-%d %H:%M")
+    if ZoneInfo is None:
+        return dt_naive  # fallback
+    return dt_naive.replace(tzinfo=ZoneInfo(tz_name))
+
+
+def get_current_month_deadline(deadlines_df: pd.DataFrame):
+    """
+    Returns (deadline_dt, tz_name, month_key) for the current month.
+    If not found, returns (None, tz_name_guess, month_key).
+    """
+    # Prefer SA timezone if present; otherwise use first row; otherwise default
+    tz_guess = "Africa/Johannesburg"
+    if not deadlines_df.empty and deadlines_df["timezone"].astype(str).str.strip().iloc[0]:
+        tz_guess = str(deadlines_df["timezone"].iloc[0]).strip()
+
+    now_guess = get_now_in_tz(tz_guess)
+    month_key = now_guess.strftime("%Y-%m")
+
+    match = deadlines_df[deadlines_df["month"] == month_key]
+    if match.empty:
+        return None, tz_guess, month_key
+
+    row = match.iloc[0]
+    tz_name = str(row["timezone"]).strip() or tz_guess
+    deadline_dt = parse_deadline_local(str(row["deadline_local"]).strip(), tz_name)
+    return deadline_dt, tz_name, month_key
+
+
+def format_minutes_remaining(delta_seconds: float) -> str:
+    mins = max(0, int(delta_seconds // 60))
+    hrs = mins // 60
+    rem_m = mins % 60
+    if hrs > 0:
+        return f"{hrs}h {rem_m}m"
+    return f"{rem_m}m"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -205,22 +287,9 @@ def get_report_label(row, report_label_col: str | None) -> str:
     return extract_date_from_label(str(row.get("QuestionText", "")).strip())
 
 
-# ✅✅✅ CHANGED: more robust yes_no detection so Q7 won't get skipped due to formatting
-def is_yes_no_source(series: pd.Series) -> pd.Series:
-    return (
-        series.astype(str)
-        .str.replace("\u00A0", " ", regex=False)
-        .str.replace("\u200B", "", regex=False)
-        .str.strip()
-        .str.lower()
-        .str.contains("yes_no", na=False)
-    )
-
-
 def yesno_labels(form_questions: pd.DataFrame, report_label_col: str | None) -> list[str]:
     labels = []
-    # ✅✅✅ CHANGED: replaced strict == "yes_no" with contains("yes_no")
-    rows = form_questions[is_yes_no_source(form_questions["Options Source"])]
+    rows = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"]
     for _, r in rows.iterrows():
         lbl = get_report_label(r, report_label_col)
         if lbl not in labels:
@@ -236,8 +305,7 @@ def build_human_report(form_questions: pd.DataFrame, answers: dict, report_label
     director = answers.get("Q1") or "—"
     name = answers.get("Q2") or "—"
     lines = [f"Director: {director}", f"Serving Girl: {name}", "Availability:"]
-    # ✅✅✅ CHANGED: replaced strict == "yes_no" with contains("yes_no")
-    rows = form_questions[is_yes_no_source(form_questions["Options Source"])]
+    rows = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"]
     for _, r in rows.iterrows():
         qid = str(r["QuestionID"])
         label = get_report_label(r, report_label_col)
@@ -423,12 +491,68 @@ REPORT_LABEL_COL = pick_report_label_col(form_questions)
 if not REPORT_LABEL_COL:
     st.warning("No 'Report Label' column found (exact match not detected). Using auto-detected labels.")
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ✅ NEW: Deadline UI + enforcement (uses deadlines.csv)
+# ──────────────────────────────────────────────────────────────────────────────
+deadline_dt = None
+deadline_tz = "Africa/Johannesburg"
+month_key = None
+
+try:
+    deadlines_df = load_deadlines()
+    deadline_dt, deadline_tz, month_key = get_current_month_deadline(deadlines_df)
+except FileNotFoundError:
+    st.warning("⚠️ deadlines.csv not found in /data. Deadline enforcement is OFF until you upload it.")
+except Exception as e:
+    st.warning(f"⚠️ Deadlines file error: {e}. Deadline enforcement is OFF until fixed.")
+
+# Determine open/closed
+is_closed = False
+now_local = None
+remaining_seconds = None
+
+if deadline_dt is not None:
+    # If we have timezone info, use it; otherwise fall back
+    now_local = get_now_in_tz(deadline_tz)
+    try:
+        remaining_seconds = (deadline_dt - now_local).total_seconds()
+        is_closed = remaining_seconds <= 0
+    except Exception:
+        # If timezone mismatch occurs, be safe: close
+        is_closed = True
+
+    # ✅ NEW: refresh every 60s so the countdown updates in minutes
+    # (This does NOT affect submission accuracy; submit is checked server-side below.)
+    st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
+
+    # Show countdown banner
+    if not is_closed:
+        st.info(
+            f"⏳ Form closes for **{month_key}** at **{deadline_dt.strftime('%Y-%m-%d %H:%M')}** ({deadline_tz}). "
+            f"Time remaining: **{format_minutes_remaining(remaining_seconds)}**"
+        )
+    else:
+        st.error(
+            f"🔒 Form is CLOSED for **{month_key}** (deadline was **{deadline_dt.strftime('%Y-%m-%d %H:%M')}** {deadline_tz})."
+        )
+else:
+    # No deadline row found for this month → safest is CLOSED
+    if month_key:
+        st.error(
+            f"🔒 No deadline set for **{month_key}** in deadlines.csv, so the form is CLOSED. "
+            f"Add a row for {month_key} to open it."
+        )
+    is_closed = True
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # UI state
 # ──────────────────────────────────────────────────────────────────────────────
 if "answers" not in st.session_state:
     st.session_state.answers = {}
 answers = st.session_state.answers
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Form UI
@@ -446,10 +570,10 @@ else:
 
 st.subheader("Availability")
 
-# ✅✅✅ CHANGED: robust yes_no filter so Q7 will be included even if formatting differs
-availability_questions = form_questions[is_yes_no_source(form_questions["Options Source"])].copy()
-
+availability_questions = form_questions[form_questions["Options Source"].astype(str).str.lower() == "yes_no"].copy()
 radio_options = ["Yes", "No"]
+
+# ✅ NEW: If closed, disable the radios so people can still *see* but not submit
 for _, q in availability_questions.iterrows():
     qid = str(q["QuestionID"])
     qtext = str(q["QuestionText"])
@@ -462,6 +586,7 @@ for _, q in availability_questions.iterrows():
         index=idx,
         key=f"avail_{qid}",
         horizontal=False,
+        disabled=is_closed,  # ✅ NEW
     )
     answers[qid] = choice
 
@@ -473,14 +598,11 @@ reason_dep_ids = []
 if not reason_row_df.empty:
     rr = reason_row_df.iloc[0]
     reason_qid = str(rr["QuestionID"])
-    # Parse DependsOn, e.g., Q3,Q4,Q5,Q6,Q7
     if pd.notna(rr["DependsOn"]) and str(rr["DependsOn"]).strip().lower() != "none":
         reason_dep_ids = [s.strip() for s in str(rr["DependsOn"]).split(",") if s.strip()]
 
-# *** UPDATED RULE: hide the reason box when there are 2 or more "Yes" answers ***
-REASON_YES_THRESHOLD = 2  # <<— changed from 3 to 2
+REASON_YES_THRESHOLD = 2
 
-# Render reason box only if count of Yes among its DependsOn is below threshold
 if reason_qid:
     show_reason = True
     if reason_dep_ids:
@@ -489,16 +611,14 @@ if reason_qid:
         answers[reason_qid] = st.text_area(
             str(reason_row_df.iloc[0]["QuestionText"]),
             value=answers.get(reason_qid, ""),
+            disabled=is_closed,  # ✅ NEW
         )
     else:
         answers[reason_qid] = answers.get(reason_qid, "")
 
 # Review
 st.subheader("Review")
-
-# ✅✅✅ CHANGED: yes_ids should match the same yes_no filter
-yes_ids = form_questions[is_yes_no_source(form_questions["Options Source"])]["QuestionID"].astype(str).tolist()
-
+yes_ids = form_questions[form_questions["Options Source"].str.lower() == "yes_no"]["QuestionID"].astype(str).tolist()
 c1, c2, c3 = st.columns(3)
 with c1:
     st.metric("Director", answers.get("Q1") or "—")
@@ -507,20 +627,33 @@ with c2:
 with c3:
     st.metric("Yes count", yes_count(answers, yes_ids))
 
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Submit (sticky)
 # ──────────────────────────────────────────────────────────────────────────────
 errors = {}
 st.markdown('<div class="sticky-submit">', unsafe_allow_html=True)
-submitted = st.button("Submit")
+
+# ✅ NEW: disable submit button if closed
+submitted = st.button("Submit", disabled=is_closed)
+
 st.markdown("</div>", unsafe_allow_html=True)
 
 if submitted:
+    # ✅ NEW: hard enforcement at submit time using server time
+    if deadline_dt is not None:
+        now_local = get_now_in_tz(deadline_tz)
+        if (deadline_dt - now_local).total_seconds() <= 0:
+            st.error("🔒 Sorry, the form is now closed and can’t accept submissions.")
+            st.stop()
+    else:
+        st.error("🔒 Sorry, the form is closed (no deadline set for this month).")
+        st.stop()
+
     if not answers.get("Q1"):
         errors["Q1"] = "Please select a director."
     if not answers.get("Q2"):
         errors["Q2"] = "Please select your name."
-    # If the reason box is being shown (i.e., < threshold), enforce a short reason
     if reason_qid and reason_dep_ids and (yes_count(answers, reason_dep_ids) < REASON_YES_THRESHOLD):
         if not answers.get(reason_qid) or len(answers[reason_qid].strip()) < 5:
             errors[reason_qid] = "Please provide a brief reason (at least 5 characters)."
@@ -560,7 +693,6 @@ if submitted:
         except Exception as e:
             st.error(f"Failed to save submission: {e}")
 
-        # Screenshot-friendly report
         report_text = build_human_report(form_questions, answers, REPORT_LABEL_COL)
         st.markdown("### 📄 Screenshot-friendly report (text)")
         st.code(report_text, language=None)
@@ -570,6 +702,7 @@ if submitted:
             file_name=f"Availability_{(answers.get('Q2') or 'name').replace(' ', '_')}.txt",
             mime="text/plain",
         )
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Admin: exports + non-responders + diagnostics
@@ -594,7 +727,6 @@ with st.expander("Admin"):
         st.write(f"Total submissions: **{len(responses_df)}**")
         if not responses_df.empty:
             st.dataframe(responses_df, use_container_width=True)
-            # Excel if possible, else CSV
             try:
                 import openpyxl  # noqa
                 out = BytesIO()

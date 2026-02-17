@@ -13,11 +13,11 @@ try:
 except Exception:
     ZoneInfo = None  # fallback
 
-# Optional: Google Sheets libs. If missing, the app runs in Local CSV mode.
+# Optional: Google Sheets libs.
 try:
     import gspread
     from gspread.exceptions import APIError, WorksheetNotFound
-except Exception:  # still run in local mode if not installed
+except Exception:
     gspread = None
 
     class APIError(Exception):
@@ -60,6 +60,11 @@ TAB_SERVING = "ServingBase"
 TAB_DEADLINES = "Deadlines"
 TAB_DATES = "ServiceDates"
 
+# Optional columns in ServingBase:
+# - Break since (date)  (optional)
+# - Break weeks (number) (recommended; can be calculated by formula)
+BREAK_WEEKS_COL = "Break weeks"
+BREAK_SINCE_COL = "Break since"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Secrets helpers
@@ -125,7 +130,7 @@ def gs_retry(func, *args, **kwargs):
 def get_spreadsheet():
     """
     Open the single spreadsheet and return the gspread Spreadsheet object.
-    Includes a robust private_key newline fixer to avoid RSA key parse errors.
+    Includes a robust private_key newline fixer (prevents PEM errors).
     """
     sa = _get_secret_any(["gcp_service_account"], ["general", "gcp_service_account"])
     sheet_id = _get_secret_any(["GSHEET_ID"], ["general", "GSHEET_ID"])
@@ -133,10 +138,9 @@ def get_spreadsheet():
     if not sa or not sheet_id:
         raise RuntimeError("Missing GSHEET_ID or gcp_service_account in secrets.")
 
-    sa = dict(sa)  # copy so we can safely modify
+    sa = dict(sa)
     pk = sa.get("private_key", "")
     if isinstance(pk, str):
-        # ✅ Key fix: convert literal \\n to real newlines and ensure trailing newline
         pk = pk.replace("\\n", "\n").strip()
         if not pk.endswith("\n"):
             pk += "\n"
@@ -179,7 +183,7 @@ def ws_ensure_header(ws, desired_header: list[str]) -> list[str]:
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_serving_df() -> pd.DataFrame:
     sh = get_spreadsheet()
-    ws = ensure_worksheet(sh, TAB_SERVING, rows=4000, cols=10)
+    ws = ensure_worksheet(sh, TAB_SERVING, rows=4000, cols=20)
     return ws_get_df(ws)
 
 
@@ -200,13 +204,13 @@ def fetch_service_dates_df() -> pd.DataFrame:
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_responses_df() -> pd.DataFrame:
     sh = get_spreadsheet()
-    ws = ensure_worksheet(sh, TAB_RESPONSES, rows=8000, cols=200)
+    ws = ensure_worksheet(sh, TAB_RESPONSES, rows=8000, cols=250)
     return ws_get_df(ws)
 
 
 def append_response_row(desired_header: list[str], row_map: dict):
     sh = get_spreadsheet()
-    ws = ensure_worksheet(sh, TAB_RESPONSES, rows=8000, cols=max(200, len(desired_header) + 10))
+    ws = ensure_worksheet(sh, TAB_RESPONSES, rows=8000, cols=max(250, len(desired_header) + 10))
     header = ws_ensure_header(ws, desired_header)
     row = [row_map.get(col, "") for col in header]
     gs_retry(ws.append_row, row)
@@ -307,6 +311,18 @@ def _safe_parse_date_ymd(s: str) -> datetime:
         return datetime(1900, 1, 1)
 
 
+def _to_float_or_none(v):
+    try:
+        if v is None:
+            return None
+        s = str(v).strip()
+        if s == "" or s.lower() == "none" or s.lower() == "nan":
+            return None
+        return float(s)
+    except Exception:
+        return None
+
+
 # ─────────────────────────────────────────────────────────────
 # Load config from Google Sheets
 # ─────────────────────────────────────────────────────────────
@@ -332,6 +348,18 @@ for df, name, needed in [
 # Clean columns
 serving_base["Director"] = serving_base["Director"].astype(str).str.strip()
 serving_base["Serving Girl"] = serving_base["Serving Girl"].astype(str).str.strip()
+
+# Optional break columns
+if BREAK_SINCE_COL in serving_base.columns:
+    serving_base[BREAK_SINCE_COL] = serving_base[BREAK_SINCE_COL].astype(str).str.strip()
+else:
+    serving_base[BREAK_SINCE_COL] = ""
+
+if BREAK_WEEKS_COL in serving_base.columns:
+    serving_base[BREAK_WEEKS_COL] = serving_base[BREAK_WEEKS_COL].astype(str).str.strip()
+else:
+    serving_base[BREAK_WEEKS_COL] = ""
+
 serving_base = serving_base[(serving_base["Director"] != "") & (serving_base["Serving Girl"] != "")].drop_duplicates()
 
 deadlines_df["month"] = deadlines_df["month"].astype(str).str.strip()
@@ -386,7 +414,7 @@ month_dates = month_dates.sort_values("_sort").drop(columns=["_sort"])
 date_labels = month_dates["label"].astype(str).tolist()
 required_yes = required_yes_for_count(len(date_labels))
 
-# Deadline for target month
+
 def get_deadline_for_target_month(deadlines: pd.DataFrame, month_key: str):
     tz_guess = BASE_TZ
     match = deadlines[deadlines["month"] == month_key]
@@ -434,7 +462,7 @@ if is_closed:
     st.stop()
 
 # Countdown + policy note
-# ✅ IMPORTANT CHANGE: removed auto-refresh that kicked people out mid-submission.
+# ✅ IMPORTANT: NO auto-refresh (prevents people getting kicked out mid-submission)
 now_local = get_now_in_tz(deadline_tz)
 remaining_seconds = (deadline_dt - now_local).total_seconds()
 
@@ -448,7 +476,6 @@ st.info(
     f"Please remember to send a screenshot of your final submission to your director."
 )
 
-# Optional: manual refresh button (safe, doesn't auto-kick users)
 if st.button("Refresh timer"):
     st.rerun()
 
@@ -600,39 +627,77 @@ if submitted:
 # ─────────────────────────────────────────────────────────────
 # Admin: exports + non-responders + diagnostics
 # ─────────────────────────────────────────────────────────────
-def compute_nonresponders(serving_base_df: pd.DataFrame, responses_df: pd.DataFrame) -> pd.DataFrame:
+def compute_nonresponders_with_breaks(serving_base_df: pd.DataFrame, responses_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Output includes:
+      - Status: "Non-responder" OR "On break"
+      - Break weeks (optional)
+      - Break since (optional)
+    """
     if serving_base_df is None or serving_base_df.empty:
-        return pd.DataFrame(columns=["Director", "Serving Girl"])
+        return pd.DataFrame(columns=["Director", "Serving Girl", "Status", BREAK_WEEKS_COL, BREAK_SINCE_COL])
 
-    sb = serving_base_df[["Director", "Serving Girl"]].copy()
+    sb = serving_base_df[["Director", "Serving Girl", BREAK_WEEKS_COL, BREAK_SINCE_COL]].copy()
     sb["Director"] = sb["Director"].astype(str).str.strip()
     sb["Serving Girl"] = sb["Serving Girl"].astype(str).str.strip()
+    sb[BREAK_WEEKS_COL] = sb[BREAK_WEEKS_COL].astype(str).str.strip()
+    sb[BREAK_SINCE_COL] = sb[BREAK_SINCE_COL].astype(str).str.strip()
+
     sb = sb[(sb["Director"] != "") & (sb["Serving Girl"] != "")].drop_duplicates()
 
+    # If no responses at all
     if responses_df is None or responses_df.empty:
         out = sb.copy()
         out["Responded"] = False
         out["Last submission"] = ""
-        return out
+    else:
+        cols = list(responses_df.columns)
+        ts_col = "timestamp" if "timestamp" in cols else (cols[0] if cols else "timestamp")
+        use_cols = [c for c in cols if c in ["Director", "Serving Girl"] or c == ts_col]
+        resp = responses_df[use_cols].copy()
+        if ts_col not in resp.columns:
+            resp[ts_col] = ""
+        resp.rename(columns={ts_col: "Last submission"}, inplace=True)
 
-    cols = list(responses_df.columns)
-    ts_col = "timestamp" if "timestamp" in cols else (cols[0] if cols else "timestamp")
-    use_cols = [c for c in cols if c in ["Director", "Serving Girl"] or c == ts_col]
-    resp = responses_df[use_cols].copy()
-    if ts_col not in resp.columns:
-        resp[ts_col] = ""
-    resp.rename(columns={ts_col: "Last submission"}, inplace=True)
+        resp["Director"] = resp["Director"].astype(str).str.strip()
+        resp["Serving Girl"] = resp["Serving Girl"].astype(str).str.strip()
+        resp = resp.sort_values("Last submission").drop_duplicates(subset=["Director", "Serving Girl"], keep="last")
 
-    resp["Director"] = resp["Director"].astype(str).str.strip()
-    resp["Serving Girl"] = resp["Serving Girl"].astype(str).str.strip()
-    resp = resp.sort_values("Last submission").drop_duplicates(
-        subset=["Director", "Serving Girl"], keep="last"
-    )
+        out = sb.merge(resp, on=["Director", "Serving Girl"], how="left")
+        out["Responded"] = out["Last submission"].notna() & (out["Last submission"] != "")
 
-    merged = sb.merge(resp, on=["Director", "Serving Girl"], how="left")
-    merged["Responded"] = merged["Last submission"].notna() & (merged["Last submission"] != "")
-    nonresp = merged[~merged["Responded"]].copy()
-    return nonresp.sort_values(["Director", "Serving Girl"]).reset_index(drop=True)
+    # Only keep those who did NOT respond
+    out = out[~out["Responded"]].copy()
+
+    # Determine break status
+    out["_break_weeks_num"] = out[BREAK_WEEKS_COL].map(_to_float_or_none)
+    out["Status"] = out["_break_weeks_num"].apply(lambda x: "On break" if (x is not None and x > 0) else "Non-responder")
+
+    # Friendly break display (optional)
+    def _break_display(row):
+        w = row["_break_weeks_num"]
+        if w is None or w <= 0:
+            return ""
+        # keep integers clean
+        if abs(w - int(w)) < 1e-9:
+            w = int(w)
+        return f"{w} week(s)"
+    out["Break duration"] = out.apply(_break_display, axis=1)
+
+    cols_out = ["Director", "Serving Girl", "Status", "Break duration"]
+    if BREAK_WEEKS_COL in out.columns:
+        cols_out.append(BREAK_WEEKS_COL)
+    if BREAK_SINCE_COL in out.columns:
+        cols_out.append(BREAK_SINCE_COL)
+    cols_out.append("Last submission")
+
+    # ensure missing columns exist
+    for c in cols_out:
+        if c not in out.columns:
+            out[c] = ""
+
+    out = out[cols_out].sort_values(["Status", "Director", "Serving Girl"]).reset_index(drop=True)
+    return out
 
 
 with st.expander("Admin"):
@@ -676,17 +741,34 @@ with st.expander("Admin"):
         else:
             st.warning("No submissions yet.")
 
-        st.markdown("### ❌ Non-responders")
-        nonresp_df = compute_nonresponders(serving_base, responses_df)
+        st.markdown("### ❌ Non-responders (with break info)")
+        nonresp_df = compute_nonresponders_with_breaks(serving_base, responses_df)
 
+        # Filters
         all_directors = ["All"] + sorted(serving_base["Director"].unique().tolist())
         sel_dir = st.selectbox("Filter by director", options=all_directors, index=0)
-        view_df = nonresp_df if sel_dir == "All" else nonresp_df[nonresp_df["Director"] == sel_dir]
+
+        status_filter = st.radio("Show", options=["Active non-responders", "On break", "All"], horizontal=True)
+
+        view_df = nonresp_df.copy()
+        if sel_dir != "All":
+            view_df = view_df[view_df["Director"] == sel_dir]
+
+        if status_filter == "Active non-responders":
+            view_df = view_df[view_df["Status"] == "Non-responder"]
+        elif status_filter == "On break":
+            view_df = view_df[view_df["Status"] == "On break"]
+
         total_expected = len(serving_base[["Director", "Serving Girl"]].dropna().drop_duplicates())
-        st.write(
-            f"Non-responders shown: **{len(view_df)}**  |  Total expected pairs: **{total_expected}**"
-        )
-        st.dataframe(view_df[["Director", "Serving Girl"]], use_container_width=True)
+        st.write(f"Shown: **{len(view_df)}**  |  Total expected pairs: **{total_expected}**")
+
+        # Show the most useful columns first
+        show_cols = ["Director", "Serving Girl", "Status", "Break duration"]
+        if BREAK_WEEKS_COL in view_df.columns:
+            show_cols.append(BREAK_WEEKS_COL)
+        if BREAK_SINCE_COL in view_df.columns:
+            show_cols.append(BREAK_SINCE_COL)
+        st.dataframe(view_df[show_cols], use_container_width=True)
 
         st.divider()
         st.markdown("#### 🔍 Secrets / Sheets check")
@@ -696,20 +778,20 @@ with st.expander("Admin"):
             gs_id = s.get("GSHEET_ID") or s.get("general", {}).get("GSHEET_ID")
             st.write(
                 {
-                    "SHEETS_MODE": SHEETS_MODE,
                     "GSHEET_ID_present": bool(gs_id),
                     "client_email": gsa.get("client_email", "(missing)"),
                     "private_key_present": bool(gsa.get("private_key")),
-                    "private_key_starts_with": (gsa.get("private_key", "")[:30] if gsa else ""),
                     "gspread_installed": gspread is not None,
                     "tabs_expected": [TAB_RESPONSES, TAB_SERVING, TAB_DEADLINES, TAB_DATES],
+                    "servingbase_has_break_weeks": BREAK_WEEKS_COL in serving_base.columns,
+                    "servingbase_has_break_since": BREAK_SINCE_COL in serving_base.columns,
                 }
             )
             sh = get_spreadsheet()
-            ensure_worksheet(sh, TAB_RESPONSES, rows=8000, cols=200)
-            ensure_worksheet(sh, TAB_SERVING, rows=4000, cols=10)
+            ensure_worksheet(sh, TAB_RESPONSES, rows=8000, cols=250)
+            ensure_worksheet(sh, TAB_SERVING, rows=4000, cols=20)
             ensure_worksheet(sh, TAB_DEADLINES, rows=500, cols=10)
             ensure_worksheet(sh, TAB_DATES, rows=4000, cols=10)
             st.success(f"✅ Auth OK. Opened sheet: {sh.title}")
         except Exception as e:
-            st.error(f"❌ Diagnostics failed: {e}")
+            st.error(f"❌

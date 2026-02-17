@@ -2,7 +2,6 @@
 import time
 import random
 from io import BytesIO
-from pathlib import Path
 from datetime import datetime
 
 import pandas as pd
@@ -225,9 +224,9 @@ def clear_caches():
         pass
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # Time helpers
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 def get_now_in_tz(tz_name: str) -> datetime:
     if ZoneInfo is None:
         return datetime.utcnow()
@@ -266,9 +265,9 @@ def format_minutes_remaining(delta_seconds: float) -> str:
     return f"{rem_m}m"
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # Business rules
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 def required_yes_for_count(n_dates: int) -> int:
     # - 5 dates => must say YES to at least 3
     # - 4 dates => must say YES to at least 2
@@ -435,9 +434,9 @@ if is_closed:
     st.stop()
 
 # Countdown + policy note
+# ✅ IMPORTANT CHANGE: removed auto-refresh that kicked people out mid-submission.
 now_local = get_now_in_tz(deadline_tz)
 remaining_seconds = (deadline_dt - now_local).total_seconds()
-st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
 
 st.info(
     f"🗓️ Submitting availability for **{target_month_key}**.\n\n"
@@ -448,6 +447,10 @@ st.info(
     f"We will use your most recent submission for scheduling. "
     f"Please remember to send a screenshot of your final submission to your director."
 )
+
+# Optional: manual refresh button (safe, doesn't auto-kick users)
+if st.button("Refresh timer"):
+    st.rerun()
 
 # ─────────────────────────────────────────────────────────────
 # UI state

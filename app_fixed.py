@@ -61,8 +61,6 @@ TAB_DEADLINES = "Deadlines"
 TAB_DATES = "ServiceDates"
 
 # Optional columns in ServingBase:
-# - Break since (date)  (optional)
-# - Break weeks (number) (recommended; can be calculated by formula)
 BREAK_WEEKS_COL = "Break weeks"
 BREAK_SINCE_COL = "Break since"
 
@@ -75,6 +73,7 @@ def _get_secret_any(*paths):
         cur = st.secrets
     except Exception:
         return None
+
     for path in paths:
         c = cur
         ok = True
@@ -130,7 +129,7 @@ def gs_retry(func, *args, **kwargs):
 def get_spreadsheet():
     """
     Open the single spreadsheet and return the gspread Spreadsheet object.
-    Includes a robust private_key newline fixer (prevents PEM errors).
+    Includes a robust private_key newline fixer.
     """
     sa = _get_secret_any(["gcp_service_account"], ["general", "gcp_service_account"])
     sheet_id = _get_secret_any(["GSHEET_ID"], ["general", "GSHEET_ID"])
@@ -273,8 +272,6 @@ def format_minutes_remaining(delta_seconds: float) -> str:
 # Business rules
 # ─────────────────────────────────────────────────────────────
 def required_yes_for_count(n_dates: int) -> int:
-    # - 5 dates => must say YES to at least 3
-    # - 4 dates => must say YES to at least 2
     return 3 if n_dates >= 5 else 2
 
 
@@ -316,7 +313,7 @@ def _to_float_or_none(v):
         if v is None:
             return None
         s = str(v).strip()
-        if s == "" or s.lower() == "none" or s.lower() == "nan":
+        if s == "" or s.lower() in {"none", "nan"}:
             return None
         return float(s)
     except Exception:
@@ -334,7 +331,6 @@ except Exception as e:
     st.error(f"Failed to load config from Google Sheets: {e}")
     st.stop()
 
-# Validate required columns
 for df, name, needed in [
     (serving_base, "ServingBase", {"Director", "Serving Girl"}),
     (deadlines_df, "Deadlines", {"month", "deadline_local", "timezone"}),
@@ -349,7 +345,6 @@ for df, name, needed in [
 serving_base["Director"] = serving_base["Director"].astype(str).str.strip()
 serving_base["Serving Girl"] = serving_base["Serving Girl"].astype(str).str.strip()
 
-# Optional break columns
 if BREAK_SINCE_COL in serving_base.columns:
     serving_base[BREAK_SINCE_COL] = serving_base[BREAK_SINCE_COL].astype(str).str.strip()
 else:
@@ -371,14 +366,12 @@ service_dates_all["date"] = service_dates_all["date"].astype(str).str.strip()
 service_dates_all["label"] = service_dates_all["label"].astype(str).str.strip()
 service_dates_all["is_service_day"] = service_dates_all["is_service_day"].astype(str).str.strip()
 
-# Build director->girls map
 serving_map = (
     serving_base.groupby("Director")["Serving Girl"]
     .apply(lambda s: sorted({x for x in s if x}))
     .to_dict()
 )
 
-# Base timezone (prefer first row timezone)
 BASE_TZ = "Africa/Johannesburg"
 try:
     tz0 = str(deadlines_df["timezone"].iloc[0]).strip()
@@ -390,7 +383,6 @@ except Exception:
 now_base = get_now_in_tz(BASE_TZ)
 target_month_key = get_target_month_key(now_base)
 
-# Filter service dates for target month
 month_dates = service_dates_all[
     (service_dates_all["target_month"] == target_month_key)
     & (service_dates_all["is_service_day"] == "1")
@@ -428,7 +420,6 @@ def get_deadline_for_target_month(deadlines: pd.DataFrame, month_key: str):
 
 deadline_dt, deadline_tz = get_deadline_for_target_month(deadlines_df, target_month_key)
 
-# Closed if missing deadline or past deadline
 is_closed = True
 if deadline_dt is not None:
     now_local = get_now_in_tz(deadline_tz)
@@ -462,7 +453,6 @@ if is_closed:
     st.stop()
 
 # Countdown + policy note
-# ✅ IMPORTANT: NO auto-refresh (prevents people getting kicked out mid-submission)
 now_local = get_now_in_tz(deadline_tz)
 remaining_seconds = (deadline_dt - now_local).total_seconds()
 
@@ -525,7 +515,6 @@ if needs_reason:
 else:
     answers["Q_REASON"] = answers.get("Q_REASON", "")
 
-# Review
 st.subheader("Review")
 c1, c2, c3, c4 = st.columns(4)
 with c1:
@@ -546,7 +535,6 @@ submitted = st.button("Submit")
 st.markdown("</div>", unsafe_allow_html=True)
 
 if submitted:
-    # Hard deadline check on submit too
     now_check = get_now_in_tz(deadline_tz)
     if (deadline_dt - now_check).total_seconds() <= 0:
         target_month_dt = datetime.strptime(target_month_key, "%Y-%m")
@@ -579,9 +567,8 @@ if submitted:
         errors["Q1"] = "Please select a director."
     if not answers.get("Q2"):
         errors["Q2"] = "Please select your name."
-    if needs_reason:
-        if not answers.get("Q_REASON") or len(str(answers["Q_REASON"]).strip()) < 5:
-            errors["Q_REASON"] = "Please provide a brief reason (at least 5 characters)."
+    if needs_reason and (not answers.get("Q_REASON") or len(str(answers["Q_REASON"]).strip()) < 5):
+        errors["Q_REASON"] = "Please provide a brief reason (at least 5 characters)."
 
     if errors:
         for msg in errors.values():
@@ -628,12 +615,6 @@ if submitted:
 # Admin: exports + non-responders + diagnostics
 # ─────────────────────────────────────────────────────────────
 def compute_nonresponders_with_breaks(serving_base_df: pd.DataFrame, responses_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Output includes:
-      - Status: "Non-responder" OR "On break"
-      - Break weeks (optional)
-      - Break since (optional)
-    """
     if serving_base_df is None or serving_base_df.empty:
         return pd.DataFrame(columns=["Director", "Serving Girl", "Status", BREAK_WEEKS_COL, BREAK_SINCE_COL])
 
@@ -642,10 +623,8 @@ def compute_nonresponders_with_breaks(serving_base_df: pd.DataFrame, responses_d
     sb["Serving Girl"] = sb["Serving Girl"].astype(str).str.strip()
     sb[BREAK_WEEKS_COL] = sb[BREAK_WEEKS_COL].astype(str).str.strip()
     sb[BREAK_SINCE_COL] = sb[BREAK_SINCE_COL].astype(str).str.strip()
-
     sb = sb[(sb["Director"] != "") & (sb["Serving Girl"] != "")].drop_duplicates()
 
-    # If no responses at all
     if responses_df is None or responses_df.empty:
         out = sb.copy()
         out["Responded"] = False
@@ -666,22 +645,18 @@ def compute_nonresponders_with_breaks(serving_base_df: pd.DataFrame, responses_d
         out = sb.merge(resp, on=["Director", "Serving Girl"], how="left")
         out["Responded"] = out["Last submission"].notna() & (out["Last submission"] != "")
 
-    # Only keep those who did NOT respond
     out = out[~out["Responded"]].copy()
-
-    # Determine break status
     out["_break_weeks_num"] = out[BREAK_WEEKS_COL].map(_to_float_or_none)
     out["Status"] = out["_break_weeks_num"].apply(lambda x: "On break" if (x is not None and x > 0) else "Non-responder")
 
-    # Friendly break display (optional)
     def _break_display(row):
         w = row["_break_weeks_num"]
         if w is None or w <= 0:
             return ""
-        # keep integers clean
         if abs(w - int(w)) < 1e-9:
             w = int(w)
         return f"{w} week(s)"
+
     out["Break duration"] = out.apply(_break_display, axis=1)
 
     cols_out = ["Director", "Serving Girl", "Status", "Break duration"]
@@ -691,7 +666,6 @@ def compute_nonresponders_with_breaks(serving_base_df: pd.DataFrame, responses_d
         cols_out.append(BREAK_SINCE_COL)
     cols_out.append("Last submission")
 
-    # ensure missing columns exist
     for c in cols_out:
         if c not in out.columns:
             out[c] = ""
@@ -744,10 +718,8 @@ with st.expander("Admin"):
         st.markdown("### ❌ Non-responders (with break info)")
         nonresp_df = compute_nonresponders_with_breaks(serving_base, responses_df)
 
-        # Filters
         all_directors = ["All"] + sorted(serving_base["Director"].unique().tolist())
         sel_dir = st.selectbox("Filter by director", options=all_directors, index=0)
-
         status_filter = st.radio("Show", options=["Active non-responders", "On break", "All"], horizontal=True)
 
         view_df = nonresp_df.copy()
@@ -762,7 +734,6 @@ with st.expander("Admin"):
         total_expected = len(serving_base[["Director", "Serving Girl"]].dropna().drop_duplicates())
         st.write(f"Shown: **{len(view_df)}**  |  Total expected pairs: **{total_expected}**")
 
-        # Show the most useful columns first
         show_cols = ["Director", "Serving Girl", "Status", "Break duration"]
         if BREAK_WEEKS_COL in view_df.columns:
             show_cols.append(BREAK_WEEKS_COL)
@@ -787,6 +758,7 @@ with st.expander("Admin"):
                     "servingbase_has_break_since": BREAK_SINCE_COL in serving_base.columns,
                 }
             )
+
             sh = get_spreadsheet()
             ensure_worksheet(sh, TAB_RESPONSES, rows=8000, cols=250)
             ensure_worksheet(sh, TAB_SERVING, rows=4000, cols=20)
@@ -794,4 +766,4 @@ with st.expander("Admin"):
             ensure_worksheet(sh, TAB_DATES, rows=4000, cols=10)
             st.success(f"✅ Auth OK. Opened sheet: {sh.title}")
         except Exception as e:
-            st.error(f"❌
+            st.error(f"❌ Diagnostics failed: {e}")

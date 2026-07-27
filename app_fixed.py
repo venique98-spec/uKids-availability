@@ -512,37 +512,38 @@ else:
     answers["Q2"] = ""
 
 st.subheader(f"Availability for {target_month_key}")
-st.caption("Each date below has a Morning and an Evening service — please answer both.")
 
-radio_options = ["Yes", "No"]
+st.markdown(f"**Please select {required_sessions} morning service(s) that you can serve:**")
+morning_selected = []
 for lbl in date_labels:
-    st.markdown(f'<div class="date-block"><strong>{lbl}</strong></div>', unsafe_allow_html=True)
-
-    saved_am = answers.get(f"{lbl}__{SESSION_AM}")
-    idx_am = radio_options.index(saved_am) if saved_am in radio_options else None
-    choice_am = st.radio(
-        f"{lbl} — {SESSION_LABELS[SESSION_AM]} service",
-        options=radio_options,
-        index=idx_am,
-        key=f"avail_{target_month_key}_{lbl}_{SESSION_AM}",
-        horizontal=True,
+    checked = st.checkbox(
+        lbl,
+        value=lbl in answers.get("MORNING_DATES", []),
+        key=f"morning_{target_month_key}_{lbl}",
     )
+    if checked:
+        morning_selected.append(lbl)
 
-    saved_pm = answers.get(f"{lbl}__{SESSION_PM}")
-    idx_pm = radio_options.index(saved_pm) if saved_pm in radio_options else None
-    choice_pm = st.radio(
-        f"{lbl} — {SESSION_LABELS[SESSION_PM]} service",
-        options=radio_options,
-        index=idx_pm,
-        key=f"avail_{target_month_key}_{lbl}_{SESSION_PM}",
-        horizontal=True,
+st.markdown(f"**Please select {required_sessions} evening service(s) that you can serve:**")
+evening_selected = []
+for lbl in date_labels:
+    checked = st.checkbox(
+        lbl,
+        value=lbl in answers.get("EVENING_DATES", []),
+        key=f"evening_{target_month_key}_{lbl}",
     )
+    if checked:
+        evening_selected.append(lbl)
 
-    answers[f"{lbl}__{SESSION_AM}"] = choice_am
-    answers[f"{lbl}__{SESSION_PM}"] = choice_pm
+answers["MORNING_DATES"] = morning_selected
+answers["EVENING_DATES"] = evening_selected
 
-morning_yes = session_yes_count(answers, date_labels, SESSION_AM)
-evening_yes = session_yes_count(answers, date_labels, SESSION_PM)
+for lbl in date_labels:
+    answers[f"{lbl}__{SESSION_AM}"] = "Yes" if lbl in morning_selected else "No"
+    answers[f"{lbl}__{SESSION_PM}"] = "Yes" if lbl in evening_selected else "No"
+
+morning_yes = len(morning_selected)
+evening_yes = len(evening_selected)
 needs_reason = morning_yes < required_sessions or evening_yes < required_sessions
 
 if needs_reason:

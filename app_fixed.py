@@ -629,8 +629,8 @@ if submitted:
             row_map[f"{lbl} - Evening"] = (answers.get(f"{lbl}__{SESSION_PM}") or "No").title()
 
         desired_header = ["timestamp", "Availability month", "Director", "Serving Girl", "Reason"]
-        for lbl in date_labels:
-            desired_header += [f"{lbl} - Morning", f"{lbl} - Evening"]
+        desired_header += [f"{lbl} - Morning" for lbl in date_labels]
+        desired_header += [f"{lbl} - Evening" for lbl in date_labels]
 
         try:
             append_response_row(desired_header, row_map)

@@ -517,29 +517,26 @@ st.caption("Each date below has a Morning and an Evening service — please answ
 radio_options = ["Yes", "No"]
 for lbl in date_labels:
     st.markdown(f'<div class="date-block"><strong>{lbl}</strong></div>', unsafe_allow_html=True)
-    col_am, col_pm = st.columns(2)
 
     saved_am = answers.get(f"{lbl}__{SESSION_AM}")
     idx_am = radio_options.index(saved_am) if saved_am in radio_options else None
-    with col_am:
-        choice_am = st.radio(
-            f"{SESSION_LABELS[SESSION_AM]}",
-            options=radio_options,
-            index=idx_am,
-            key=f"avail_{target_month_key}_{lbl}_{SESSION_AM}",
-            horizontal=True,
-        )
+    choice_am = st.radio(
+        f"{lbl} — {SESSION_LABELS[SESSION_AM]} service",
+        options=radio_options,
+        index=idx_am,
+        key=f"avail_{target_month_key}_{lbl}_{SESSION_AM}",
+        horizontal=True,
+    )
 
     saved_pm = answers.get(f"{lbl}__{SESSION_PM}")
     idx_pm = radio_options.index(saved_pm) if saved_pm in radio_options else None
-    with col_pm:
-        choice_pm = st.radio(
-            f"{SESSION_LABELS[SESSION_PM]}",
-            options=radio_options,
-            index=idx_pm,
-            key=f"avail_{target_month_key}_{lbl}_{SESSION_PM}",
-            horizontal=True,
-        )
+    choice_pm = st.radio(
+        f"{lbl} — {SESSION_LABELS[SESSION_PM]} service",
+        options=radio_options,
+        index=idx_pm,
+        key=f"avail_{target_month_key}_{lbl}_{SESSION_PM}",
+        horizontal=True,
+    )
 
     answers[f"{lbl}__{SESSION_AM}"] = choice_am
     answers[f"{lbl}__{SESSION_PM}"] = choice_pm

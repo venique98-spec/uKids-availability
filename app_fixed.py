@@ -46,6 +46,11 @@ st.markdown(
     position: sticky; bottom: 0; z-index: 999;
     background: #fff; padding: 10px 0; border-top: 1px solid #eee;
   }
+  .date-block {
+    padding: 10px 0 4px 0;
+    border-bottom: 1px solid #eee;
+    margin-bottom: 4px;
+  }
 </style>
 """,
     unsafe_allow_html=True,
@@ -63,6 +68,11 @@ TAB_DATES = "ServiceDates"
 # Optional columns in ServingBase:
 BREAK_WEEKS_COL = "Break weeks"
 BREAK_SINCE_COL = "Break since"
+
+# Session labels used for the Morning / Evening split
+SESSION_AM = "AM"
+SESSION_PM = "PM"
+SESSION_LABELS = {SESSION_AM: "Morning", SESSION_PM: "Evening"}
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Secrets helpers
@@ -271,12 +281,19 @@ def format_minutes_remaining(delta_seconds: float) -> str:
 # ─────────────────────────────────────────────────────────────
 # Business rules
 # ─────────────────────────────────────────────────────────────
-def required_yes_for_count(n_dates: int) -> int:
+def required_sessions_for_count(n_dates: int) -> int:
+    """
+    Each service date has a Morning AND an Evening service.
+    A 4-date (4-week) month requires 2 Morning + 2 Evening selections.
+    A 5-date (5-week) month requires 3 Morning + 3 Evening selections.
+    """
     return 3 if n_dates >= 5 else 2
 
 
-def yes_count_from_labels(answers: dict, labels: list[str]) -> int:
-    return sum(1 for lbl in labels if str(answers.get(lbl, "")).strip().lower() == "yes")
+def session_yes_count(answers: dict, labels: list[str], session: str) -> int:
+    return sum(
+        1 for lbl in labels if str(answers.get(f"{lbl}__{session}", "")).strip().lower() == "yes"
+    )
 
 
 def build_human_report(
@@ -294,8 +311,9 @@ def build_human_report(
         "Availability:",
     ]
     for lbl in date_labels:
-        val = (answers.get(lbl) or "No").title()
-        lines.append(f"{lbl}: {val}")
+        am_val = (answers.get(f"{lbl}__{SESSION_AM}") or "No").title()
+        pm_val = (answers.get(f"{lbl}__{SESSION_PM}") or "No").title()
+        lines.append(f"{lbl} — Morning: {am_val}, Evening: {pm_val}")
     if reason:
         lines.append(f"Reason: {reason}")
     return "\n".join(lines)
@@ -341,7 +359,9 @@ for df, name, needed in [
         st.error(f"Google Sheet tab '{name}' is missing columns: {', '.join(sorted(miss))}")
         st.stop()
 
-# Clean columns
+# Clean columns (only the columns the app actually relies on;
+# extra columns like Username, Password, Campus, Age, Serving Role, etc.
+# are simply ignored and left untouched in the sheet)
 serving_base["Director"] = serving_base["Director"].astype(str).str.strip()
 serving_base["Serving Girl"] = serving_base["Serving Girl"].astype(str).str.strip()
 
@@ -404,7 +424,7 @@ month_dates["_sort"] = month_dates["date"].map(_safe_parse_date_ymd)
 month_dates = month_dates.sort_values("_sort").drop(columns=["_sort"])
 
 date_labels = month_dates["label"].astype(str).tolist()
-required_yes = required_yes_for_count(len(date_labels))
+required_sessions = required_sessions_for_count(len(date_labels))
 
 
 def get_deadline_for_target_month(deadlines: pd.DataFrame, month_key: str):
@@ -458,7 +478,9 @@ remaining_seconds = (deadline_dt - now_local).total_seconds()
 
 st.info(
     f"🗓️ Submitting availability for **{target_month_key}**.\n\n"
-    f"✅ You must select **YES** for at least **{required_yes}** date(s).\n\n"
+    f"✅ Each date has a **Morning** and an **Evening** service. "
+    f"You must select **YES** for at least **{required_sessions} Morning** service(s) "
+    f"and **{required_sessions} Evening** service(s).\n\n"
     f"⏳ Form closes at **{deadline_dt.strftime('%Y-%m-%d %H:%M')}** ({deadline_tz}). "
     f"Time remaining: **{format_minutes_remaining(remaining_seconds)}**\n\n"
     f"🔁 You are welcome to submit this form more than once. "
@@ -490,41 +512,63 @@ else:
     answers["Q2"] = ""
 
 st.subheader(f"Availability for {target_month_key}")
+st.caption("Each date below has a Morning and an Evening service — please answer both.")
 
 radio_options = ["Yes", "No"]
 for lbl in date_labels:
-    saved = answers.get(lbl)
-    idx = radio_options.index(saved) if saved in radio_options else None
-    choice = st.radio(
-        f"Are you available {lbl}?",
-        options=radio_options,
-        index=idx,
-        key=f"avail_{target_month_key}_{lbl}",
-        horizontal=False,
-    )
-    answers[lbl] = choice
+    st.markdown(f'<div class="date-block"><strong>{lbl}</strong></div>', unsafe_allow_html=True)
+    col_am, col_pm = st.columns(2)
 
-yes_cnt = yes_count_from_labels(answers, date_labels)
-needs_reason = yes_cnt < required_yes
+    saved_am = answers.get(f"{lbl}__{SESSION_AM}")
+    idx_am = radio_options.index(saved_am) if saved_am in radio_options else None
+    with col_am:
+        choice_am = st.radio(
+            f"{SESSION_LABELS[SESSION_AM]}",
+            options=radio_options,
+            index=idx_am,
+            key=f"avail_{target_month_key}_{lbl}_{SESSION_AM}",
+            horizontal=True,
+        )
+
+    saved_pm = answers.get(f"{lbl}__{SESSION_PM}")
+    idx_pm = radio_options.index(saved_pm) if saved_pm in radio_options else None
+    with col_pm:
+        choice_pm = st.radio(
+            f"{SESSION_LABELS[SESSION_PM]}",
+            options=radio_options,
+            index=idx_pm,
+            key=f"avail_{target_month_key}_{lbl}_{SESSION_PM}",
+            horizontal=True,
+        )
+
+    answers[f"{lbl}__{SESSION_AM}"] = choice_am
+    answers[f"{lbl}__{SESSION_PM}"] = choice_pm
+
+morning_yes = session_yes_count(answers, date_labels, SESSION_AM)
+evening_yes = session_yes_count(answers, date_labels, SESSION_PM)
+needs_reason = morning_yes < required_sessions or evening_yes < required_sessions
 
 if needs_reason:
     answers["Q_REASON"] = st.text_area(
-        f"Please provide a reason why you cannot serve **{required_yes}** time(s) this month:",
+        f"Please provide a reason why you cannot serve **{required_sessions} Morning** and "
+        f"**{required_sessions} Evening** service(s) this month:",
         value=answers.get("Q_REASON", ""),
     )
 else:
     answers["Q_REASON"] = answers.get("Q_REASON", "")
 
 st.subheader("Review")
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 with c1:
     st.metric("Director", answers.get("Q1") or "—")
 with c2:
     st.metric("Name", answers.get("Q2") or "—")
 with c3:
-    st.metric("Yes count", yes_cnt)
+    st.metric("Morning YES", f"{morning_yes}/{required_sessions}")
 with c4:
-    st.metric("Required YES", required_yes)
+    st.metric("Evening YES", f"{evening_yes}/{required_sessions}")
+with c5:
+    st.metric("Required", required_sessions)
 
 # ─────────────────────────────────────────────────────────────
 # Submit (sticky)
@@ -583,9 +627,12 @@ if submitted:
             "Reason": (answers.get("Q_REASON") or "").strip(),
         }
         for lbl in date_labels:
-            row_map[lbl] = (answers.get(lbl) or "No").title()
+            row_map[f"{lbl} - Morning"] = (answers.get(f"{lbl}__{SESSION_AM}") or "No").title()
+            row_map[f"{lbl} - Evening"] = (answers.get(f"{lbl}__{SESSION_PM}") or "No").title()
 
-        desired_header = ["timestamp", "Availability month", "Director", "Serving Girl", "Reason"] + date_labels
+        desired_header = ["timestamp", "Availability month", "Director", "Serving Girl", "Reason"]
+        for lbl in date_labels:
+            desired_header += [f"{lbl} - Morning", f"{lbl} - Evening"]
 
         try:
             append_response_row(desired_header, row_map)
